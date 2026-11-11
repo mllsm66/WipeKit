@@ -27,7 +27,7 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; else V="0.0.0-dev"; fi
           echo "VERSION=${V#v}" >> "$GITHUB_ENV"
 
-      - name: App bauen (Universal: Intel + Apple Silicon)
+      - name: "App bauen (Universal – Intel + Apple Silicon)"
         run: bash macos/build.sh
 
       - name: ZIP erstellen
