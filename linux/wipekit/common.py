@@ -47,7 +47,7 @@ class WipeMode:
 
 MODES = [
     WipeMode(
-        "quick", "Schnell", "media-seek-forward-symbolic", "1 Durchgang · ohne Prüfung",
+        "quick", "Schnell", "wipekit-quick-symbolic", "1 Durchgang · ohne Prüfung",
         (RANDOM,), False, False,
         "Überschreibt jeden Sektor des Laufwerks einmal mit kryptografisch erzeugten Zufallsdaten. "
         "Die bisherigen Daten lassen sich danach weder mit Software noch mit Labormethoden wiederherstellen.",
@@ -57,7 +57,7 @@ MODES = [
         "1 Durchgang Zufallsdaten",
     ),
     WipeMode(
-        "secure", "Sicher", "security-high-symbolic", "2 Durchgänge · mit Prüfung",
+        "secure", "Sicher", "wipekit-shield-symbolic", "2 Durchgänge · mit Prüfung",
         (RANDOM, ZEROS), True, False,
         "Überschreibt das Laufwerk zuerst mit Zufallsdaten und anschließend mit Nullen. Danach wird "
         "jeder Sektor gelesen und geprüft, ob er tatsächlich überschrieben wurde.",
@@ -67,7 +67,7 @@ MODES = [
         "2 Durchgänge (Zufallsdaten, Nullen) + vollständige Lese-Verifikation",
     ),
     WipeMode(
-        "maximum", "Maximal", "channel-secure-symbolic", "3 Durchgänge · mit Prüfung",
+        "maximum", "Maximal", "wipekit-lock-symbolic", "3 Durchgänge · mit Prüfung",
         (RANDOM, RANDOM, ZEROS), True, False,
         "Überschreibt das Laufwerk zweimal mit Zufallsdaten und einmal mit Nullen. Danach wird jeder "
         "Sektor gelesen und geprüft.",
@@ -77,7 +77,7 @@ MODES = [
         "3 Durchgänge (Zufallsdaten, Zufallsdaten, Nullen) + vollständige Lese-Verifikation",
     ),
     WipeMode(
-        "ssd", "SSD", "drive-harddisk-solidstate-symbolic", "2 Durchgänge · Prüfung · TRIM",
+        "ssd", "SSD", "wipekit-ssd-symbolic", "2 Durchgänge · Prüfung · TRIM",
         (RANDOM, SEEDED), True, True,
         "Füllt die SSD zweimal vollständig mit Zufallsdaten und prüft den zweiten Durchgang Sektor für "
         "Sektor. Zum Schluss werden alle Speicherblöcke per TRIM an den SSD-Controller freigegeben, "
@@ -165,11 +165,9 @@ class Disk:
 
     @property
     def icon(self) -> str:
-        if self.bus == "USB":
-            return "drive-harddisk-usb-symbolic"
         if self.bus in ("SD", "MMC"):
-            return "media-flash-symbolic"
-        return "drive-harddisk-symbolic"
+            return "wipekit-sd-symbolic"
+        return "wipekit-drive-symbolic"
 
 
 def _bool(v) -> bool:

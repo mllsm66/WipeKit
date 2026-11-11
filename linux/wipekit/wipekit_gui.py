@@ -18,7 +18,8 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
-from gi.repository import Adw, Gio, GLib, Gtk, Pango  # noqa: E402
+gi.require_version("Gdk", "4.0")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from common import (  # noqa: E402
@@ -28,6 +29,7 @@ from common import (  # noqa: E402
 )
 
 HELPER = Path(__file__).resolve().parent / "wipekit-helper"
+ICON_DIR = Path(__file__).resolve().parent / "icons"
 BASE_DIR = Path(f"/tmp/wipekit-{os.getuid()}")
 
 COLORS = {
@@ -420,7 +422,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def update_sleep_status(self):
         active = any(j.active for j in self.jobs)
-        self.sleep_icon.set_from_icon_name("weather-clear-symbolic" if active else "weather-clear-night-symbolic")
+        self.sleep_icon.set_from_icon_name("wipekit-awake-symbolic" if active else "wipekit-sleep-symbolic")
         self.sleep_label.set_label("Rechner bleibt wach" if active else "Ruhezustand wie gewohnt")
 
     # --- Auswahl ------------------------------------------------------------------
@@ -471,7 +473,7 @@ class MainWindow(Adw.ApplicationWindow):
         if widget is None:
             self.content_page.set_title(APP_NAME)
             status = Adw.StatusPage()
-            status.set_icon_name("drive-harddisk-usb-symbolic")
+            status.set_icon_name("wipekit-drive-symbolic")
             if self.disks:
                 status.set_title("Kein Laufwerk ausgewählt")
                 status.set_description("Wähle in der Seitenleiste das Laufwerk aus, das gelöscht werden soll.")
@@ -1029,6 +1031,9 @@ class WipeKitApp(Adw.Application):
         self.smoke_ok = False
 
     def do_activate(self):
+        display = Gdk.Display.get_default()
+        if display is not None and ICON_DIR.is_dir():
+            Gtk.IconTheme.get_for_display(display).add_search_path(str(ICON_DIR))
         if not self.window:
             self.window = MainWindow(self)
         self.window.present()
