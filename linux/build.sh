@@ -19,8 +19,8 @@ PKG="$STAGE/deb"
 install -d "$PKG/DEBIAN" "$PKG/usr/lib/wipekit" "$PKG/usr/bin"
 install -m 644 "$STAGE/wipekit/common.py" "$STAGE/wipekit/wipekit_gui.py" "$PKG/usr/lib/wipekit/"
 install -m 755 "$STAGE/wipekit/wipekit-helper" "$PKG/usr/lib/wipekit/"
-install -d "$PKG/usr/lib/wipekit/icons"
-install -m 644 "$STAGE"/wipekit/icons/*.svg "$PKG/usr/lib/wipekit/icons/"
+install -d "$PKG/usr/lib/wipekit/icons/hicolor/scalable/actions"
+install -m 644 "$STAGE"/wipekit/icons/hicolor/scalable/actions/*.svg "$PKG/usr/lib/wipekit/icons/hicolor/scalable/actions/"
 install -m 755 linux/packaging/wipekit "$PKG/usr/bin/wipekit"
 install -D -m 644 linux/packaging/$APP_ID.desktop "$PKG/usr/share/applications/$APP_ID.desktop"
 install -D -m 644 linux/packaging/$APP_ID.policy "$PKG/usr/share/polkit-1/actions/$APP_ID.policy"
@@ -33,7 +33,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), adwaita-icon-theme, pkexec | policykit-1, util-linux
+Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), adwaita-icon-theme, librsvg2-common, pkexec | policykit-1, util-linux
 Maintainer: mllsm66 <mllsm66@users.noreply.github.com>
 Homepage: https://github.com/mllsm66/WipeKit
 Description: Externe Laufwerke sicher löschen

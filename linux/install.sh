@@ -21,8 +21,8 @@ fi
 install -d /usr/lib/wipekit
 install -m 644 wipekit/common.py wipekit/wipekit_gui.py /usr/lib/wipekit/
 install -m 755 wipekit/wipekit-helper /usr/lib/wipekit/
-install -d /usr/lib/wipekit/icons
-install -m 644 wipekit/icons/*.svg /usr/lib/wipekit/icons/
+install -d /usr/lib/wipekit/icons/hicolor/scalable/actions
+install -m 644 wipekit/icons/hicolor/scalable/actions/*.svg /usr/lib/wipekit/icons/hicolor/scalable/actions/
 install -m 755 packaging/wipekit /usr/bin/wipekit
 install -D -m 644 packaging/$APP_ID.desktop /usr/share/applications/$APP_ID.desktop
 install -D -m 644 packaging/$APP_ID.policy /usr/share/polkit-1/actions/$APP_ID.policy
