@@ -696,7 +696,10 @@ class MainWindow(Adw.ApplicationWindow):
         center = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
         pct = label("", css=("title-1", "numeric"), xalign=0.5)
         step = label("", css=("dim-label", "caption"), xalign=0.5)
+        result_icon = Gtk.Image()
+        result_icon.set_pixel_size(52)
         center.append(pct)
+        center.append(result_icon)
         center.append(step)
         overlay.add_overlay(center)
         headline = label("", css=("title-2",), xalign=0.5)
@@ -705,7 +708,7 @@ class MainWindow(Adw.ApplicationWindow):
             box.append(w)
         hero.add(box)
         page.add(hero)
-        refs.update(ring=ring, pct=pct, step=step, headline=headline, subline=subline)
+        refs.update(ring=ring, pct=pct, step=step, headline=headline, subline=subline, result_icon=result_icon)
 
         bar_start, bar_end = [], []
         if j.active:
@@ -734,9 +737,7 @@ class MainWindow(Adw.ApplicationWindow):
             refs["cancel"] = cancel
         else:
             res = Adw.PreferencesGroup(title="Ergebnis")
-            msg = label(j.message or "–", wrap=True, css=("error",) if j.state == "failed" else ())
-            msg.set_margin_bottom(8)
-            res.add(msg)
+            res.set_description(("⚠ " if j.state == "failed" else "") + (j.message or "–"))
             if j.elapsed is not None:
                 res.add(row("Dauer", fmt_duration(j.elapsed), prop=True))
             if j.mode.verifies:
@@ -785,11 +786,20 @@ class MainWindow(Adw.ApplicationWindow):
             return
         refs["ring"].update(1.0 if j.state == "done" else j.fraction, j.color)
         s = j.status
+        icon = refs["result_icon"]
         if j.active:
+            refs["pct"].set_visible(True)
+            icon.set_visible(False)
             refs["pct"].set_label(fmt_percent(j.fraction))
             refs["step"].set_label(f"Schritt {s.step} von {s.stepCount}" if s and s.state == "running" else "")
         else:
-            refs["pct"].set_label({"done": "✓", "failed": "✕", "cancelled": "–"}.get(j.state, ""))
+            refs["pct"].set_visible(False)
+            icon.set_visible(True)
+            icon.set_from_icon_name({"done": "object-select-symbolic", "failed": "window-close-symbolic"}.get(
+                j.state, "media-playback-stop-symbolic"))
+            for c in ("success", "error", "warning"):
+                icon.remove_css_class(c)
+            icon.add_css_class({"done": "success", "failed": "error"}.get(j.state, "warning"))
             refs["step"].set_label("")
         refs["headline"].set_label({"starting": "Wird vorbereitet", "running": "Wird gelöscht",
                                     "done": "Löschen abgeschlossen", "failed": "Löschen fehlgeschlagen",
