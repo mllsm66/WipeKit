@@ -91,7 +91,7 @@ jobs:
       - name: Screenshots ins Log schreiben
         if: always()
         shell: bash
-        run: for f in screenshots/*.png; do echo "SHOT-BEGIN $(basename $f)"; base64 -w 0 "$f"; echo; echo "SHOT-END"; done
+        run: for f in screenshots/*.png; do echo "SHOT-BEGIN $(basename $f)"; base64 -w 120 "$f"; echo "SHOT-END"; done
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -155,7 +155,7 @@ jobs:
 
       - name: Screenshots ins Log schreiben
         if: always()
-        run: for f in screenshots/*.png; do echo "SHOT-BEGIN $(basename $f)"; base64 -w 0 "$f"; echo; echo "SHOT-END"; done
+        run: for f in screenshots/*.png; do echo "SHOT-BEGIN $(basename $f)"; base64 -w 120 "$f"; echo "SHOT-END"; done
 
       - uses: actions/upload-artifact@v4
         if: always()
