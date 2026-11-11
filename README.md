@@ -16,6 +16,13 @@
 
 WipeKit überschreibt ein komplettes Laufwerk so, dass sich die bisherigen Daten nicht wiederherstellen lassen. Die App zeigt alle angeschlossenen externen Laufwerke an. Du wählst ein Laufwerk und eine Löschmethode und siehst dann Fortschritt, Geschwindigkeit, Restzeit und die voraussichtliche Uhrzeit, zu der der Vorgang fertig ist. Am Ende legt WipeKit automatisch ein Löschprotokoll ab.
 
+## So sieht es aus
+
+| Windows | Linux |
+|---------|-------|
+| ![Löschmethode wählen unter Windows](docs/screenshots/windows-methode.png) | ![Löschmethode wählen unter Linux](docs/screenshots/linux-methode.png) |
+| ![Fortschritt unter Windows](docs/screenshots/windows-fortschritt.png) | ![Abgeschlossen unter Linux](docs/screenshots/linux-fertig.png) |
+
 ## Funktionen
 
 - **Nur externe Laufwerke**: Das Laufwerk, auf dem das System läuft, ist immer gesperrt.

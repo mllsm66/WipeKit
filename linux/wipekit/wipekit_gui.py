@@ -547,9 +547,9 @@ class MainWindow(Adw.ApplicationWindow):
                     check.set_group(first_check)
                 check.set_active(m.key == self.mode_key)
                 check.connect("toggled", self.on_mode_toggled, m.key, d)
-                r.add_prefix(check)
                 icon = Gtk.Image.new_from_icon_name(m.icon)
                 r.add_prefix(icon)
+                r.add_prefix(check)
                 if m.key == rec:
                     badge = label("Empfohlen", css=("accent", "caption-heading"))
                     badge.set_valign(Gtk.Align.CENTER)
