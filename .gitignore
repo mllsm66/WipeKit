@@ -1,0 +1,10 @@
+# Build-Ergebnisse
+macos/build/
+dist/
+windows/bin/
+windows/obj/
+**/__pycache__/
+*.pyc
+.DS_Store
+.vs/
+*.user
