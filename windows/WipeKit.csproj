@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>WipeKit</AssemblyName>
+    <RootNamespace>WipeKit</RootNamespace>
+    <ApplicationIcon>..\assets\WipeKit.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>1.0.0</Version>
+    <Product>WipeKit</Product>
+    <Company>mllsm66</Company>
+    <Copyright>© 2026 mllsm66 – MIT-Lizenz</Copyright>
+    <Description>Externe Laufwerke sicher löschen</Description>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <NoWarn>$(NoWarn);WPF0001;CA1416</NoWarn>
+    <SatelliteResourceLanguages>de</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\assets\WipeKit.ico" Link="WipeKit.ico" />
+  </ItemGroup>
+
+</Project>

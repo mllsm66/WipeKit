@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>WipeKit</vendor>
+  <vendor_url>https://github.com/mllsm66/WipeKit</vendor_url>
+  <action id="io.github.mllsm66.WipeKit.wipe">
+    <description>Erase a drive</description>
+    <description xml:lang="de">Laufwerk löschen</description>
+    <message>Authentication is required to erase a drive</message>
+    <message xml:lang="de">Zum Löschen eines Laufwerks ist eine Anmeldung als Administrator erforderlich</message>
+    <icon_name>drive-harddisk</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/wipekit/wipekit-helper</annotate>
+  </action>
+</policyconfig>

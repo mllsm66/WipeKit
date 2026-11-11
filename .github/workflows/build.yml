@@ -1,0 +1,153 @@
+name: Build
+
+# Baut WipeKit für macOS, Windows und Linux.
+# - Bei jedem Push: Probe-Build, Dateien unter »Actions« als Artefakte herunterladbar
+# - Beim Veröffentlichen eines Releases: Dateien werden automatisch an das Release angehängt
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version bestimmen
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; else V="0.0.0-dev"; fi
+          echo "VERSION=${V#v}" >> "$GITHUB_ENV"
+
+      - name: App bauen (Universal: Intel + Apple Silicon)
+        run: bash macos/build.sh
+
+      - name: ZIP erstellen
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent macos/build/WipeKit.app "dist/WipeKit-macOS-${VERSION}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WipeKit-macOS
+          path: dist/*
+
+      - name: An Release anhängen
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Version bestimmen
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; V="${V#v}"; else V="0.0.0"; fi
+          echo "VERSION=${V}" >> "$GITHUB_ENV"
+
+      - name: Portable EXE bauen
+        shell: bash
+        run: >
+          dotnet publish windows/WipeKit.csproj -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -p:DebugType=none
+          -p:Version=${VERSION} -o dist/win
+
+      - name: Lösch-Logik prüfen (mit Testdatei)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\win\WipeKit.exe -ArgumentList '--engine-test', "$env:RUNNER_TEMP\wipetest.bin" -Wait -PassThru
+          if (Test-Path "$env:RUNNER_TEMP\wipetest.bin.log") { Get-Content "$env:RUNNER_TEMP\wipetest.bin.log" }
+          if ($p.ExitCode -ne 0) { throw "Engine-Test fehlgeschlagen (Code $($p.ExitCode))" }
+
+      - name: Oberfläche prüfen
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\win\WipeKit.exe -ArgumentList '--smoke-test' -Wait -PassThru
+          $log = Join-Path $env:TEMP 'WipeKit-Smoke.log'
+          if (Test-Path $log) { Get-Content $log }
+          $err = Join-Path $env:TEMP 'WipeKit-Fehler.log'
+          if (Test-Path $err) { Get-Content $err }
+          if ($p.ExitCode -ne 0) { throw "Oberflächen-Test fehlgeschlagen (Code $($p.ExitCode))" }
+
+      - name: Installer bauen
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$env:VERSION" windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup fehlgeschlagen" }
+
+      - name: Dateien benennen
+        shell: bash
+        run: |
+          cp dist/win/WipeKit.exe "dist/WipeKit-Windows-Portable-${VERSION}.exe"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WipeKit-Windows
+          path: |
+            dist/WipeKit-Windows-Portable-*.exe
+            dist/WipeKit-Windows-Setup-*.exe
+
+      - name: An Release anhängen
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/WipeKit-Windows-Portable-*.exe dist/WipeKit-Windows-Setup-*.exe --clobber
+
+  linux:
+    name: Linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version bestimmen
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; V="${V#v}"; else V="0.0.0"; fi
+          echo "VERSION=${V}" >> "$GITHUB_ENV"
+
+      - name: Abhängigkeiten für den Test installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 xvfb dbus-x11
+
+      - name: Python-Code prüfen
+        run: |
+          python3 -m py_compile linux/wipekit/common.py linux/wipekit/wipekit_gui.py
+          python3 -c "import ast,sys; ast.parse(open('linux/wipekit/wipekit-helper').read())"
+
+      - name: Oberfläche prüfen
+        run: xvfb-run -a dbus-run-session -- python3 linux/wipekit/wipekit_gui.py --smoke-test
+
+      - name: Pakete bauen
+        run: bash linux/build.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WipeKit-Linux
+          path: dist/*
+
+      - name: An Release anhängen
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber

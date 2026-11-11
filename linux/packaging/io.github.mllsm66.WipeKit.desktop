@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=WipeKit
+GenericName=Laufwerke sicher löschen
+Comment=Externe Laufwerke sicher und nachweisbar löschen
+Exec=wipekit
+Icon=io.github.mllsm66.WipeKit
+Terminal=false
+Categories=System;Utility;
+Keywords=wipe;erase;disk;drive;ssd;löschen;festplatte;
+StartupNotify=true

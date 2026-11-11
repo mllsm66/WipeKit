@@ -1,0 +1,321 @@
+#!/usr/bin/python3
+"""WipeKit – Lösch-Prozess (läuft als root, gestartet über pkexec).
+
+Schreibt den Fortschritt nach <job-dir>/status.json und bricht ab,
+sobald <job-dir>/cancel existiert.
+"""
+
+import argparse
+import errno
+import fcntl
+import mmap
+import os
+import random
+import signal
+import struct
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from common import (  # noqa: E402
+    MODES_BY_KEY, RANDOM, SEEDED, ZEROS, HelperStatus, fmt_bytes, list_external_disks, pattern_label,
+)
+
+CHUNK = 4 * 1024 * 1024          # 4 MiB pro Schreibvorgang
+BLKDISCARD = 0x1277              # _IO(0x12, 119)
+TRIM_STEP = 1 << 30              # 1 GiB pro TRIM-Aufruf
+
+
+class Cancelled(Exception):
+    pass
+
+
+class Failed(Exception):
+    pass
+
+
+class Engine:
+    def __init__(self, disk: str, mode_key: str, job_dir: str, expected_size: int):
+        self.disk = disk
+        self.mode = MODES_BY_KEY.get(mode_key)
+        self.job_dir = job_dir
+        self.expected_size = expected_size
+        self.status_path = os.path.join(job_dir, "status.json")
+        self.cancel_path = os.path.join(job_dir, "cancel")
+        self.status = HelperStatus(pid=os.getpid(), startedAt=time.time(),
+                                   stepCount=self.mode.step_count if self.mode else 0)
+        self.last_write = 0.0
+        self.samples = []
+        self.inhibitor = None
+        self.seed = int.from_bytes(os.urandom(8), "little")
+
+    # -- Status ---------------------------------------------------------------
+
+    def write_status(self):
+        self.status.updatedAt = time.time()
+        self.last_write = self.status.updatedAt
+        tmp = self.status_path + ".tmp"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+            with os.fdopen(fd, "w") as f:
+                f.write(self.status.to_json())
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, self.status_path)
+        except OSError:
+            pass
+
+    def report(self, total: int):
+        self.status.bytesDoneTotal = total
+        now = time.time()
+        if now - self.last_write < 1:
+            return
+        self.samples.append((now, total))
+        self.samples = [s for s in self.samples if now - s[0] <= 60]   # gleitendes 60-s-Fenster
+        first = self.samples[0]
+        if now - first[0] >= 3:
+            self.status.speed = (total - first[1]) / (now - first[0])
+        elif now - self.status.startedAt > 0.5:
+            self.status.speed = total / (now - self.status.startedAt)
+        self.write_status()
+
+    def check_cancel(self):
+        if os.path.exists(self.cancel_path):
+            raise Cancelled()
+
+    def finish(self, state: str, message: str) -> int:
+        self.stop_inhibit()
+        self.status.state = state
+        self.status.message = message
+        self.status.finishedAt = time.time()
+        self.status.sleepPrevented = False
+        if state == "done":
+            self.status.bytesDoneTotal = self.status.bytesTotal
+        self.write_status()
+        return 0 if state == "done" else 1
+
+    # -- Ruhezustand ------------------------------------------------------------
+
+    def start_inhibit(self):
+        """Verhindert den Ruhezustand – der Bildschirm darf trotzdem ausgehen."""
+        try:
+            self.inhibitor = subprocess.Popen(
+                ["systemd-inhibit", "--what=sleep:idle", "--who=WipeKit",
+                 f"--why=Löschvorgang auf /dev/{self.disk}", "--mode=block", "sleep", "infinity"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.3)
+            self.status.sleepPrevented = self.inhibitor.poll() is None
+        except OSError:
+            self.inhibitor = None
+            self.status.sleepPrevented = False
+
+    def stop_inhibit(self):
+        if self.inhibitor and self.inhibitor.poll() is None:
+            self.inhibitor.terminate()
+            try:
+                self.inhibitor.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.inhibitor.kill()
+        self.inhibitor = None
+
+    # -- Ablauf -----------------------------------------------------------------
+
+    def run(self) -> int:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        self.write_status()
+        try:
+            return self._run()
+        except Cancelled:
+            return self.finish("cancelled", "Vom Benutzer abgebrochen. Das Laufwerk ist nur teilweise überschrieben.")
+        except Failed as e:
+            return self.finish("failed", str(e))
+        except Exception as e:  # unerwartet
+            return self.finish("failed", f"Unerwarteter Fehler: {e}")
+
+    def _run(self) -> int:
+        if os.geteuid() != 0:
+            raise Failed("Keine Administratorrechte.")
+        if not self.mode:
+            raise Failed("Unbekannter Löschmodus.")
+        if not self.disk or "/" in self.disk or not self.disk.isalnum():
+            raise Failed(f"Ungültige Laufwerkskennung »{self.disk}«.")
+
+        # --- Sicherheitsprüfungen ------------------------------------------------
+        disks = {d.name: d for d in list_external_disks()}
+        disk = disks.get(self.disk)
+        if not disk:
+            raise Failed(f"/dev/{self.disk} ist kein angeschlossenes externes Laufwerk (mehr).")
+        if disk.is_protected:
+            raise Failed(f"/dev/{self.disk} enthält das laufende System und wird niemals gelöscht.")
+        if disk.holders:
+            raise Failed("Auf dem Laufwerk sind verschlüsselte oder LVM-Bereiche aktiv ("
+                         + ", ".join(disk.holders) + "). Bitte zuerst sperren bzw. deaktivieren.")
+
+        self.start_inhibit()
+
+        # --- Aushängen -----------------------------------------------------------
+        self.status.phase = "Laufwerk wird ausgehängt …"
+        self.write_status()
+        for mp in sorted(disk.mountpoints, key=len, reverse=True):
+            r = subprocess.run(["umount", mp], capture_output=True, text=True)
+            if r.returncode != 0:
+                raise Failed(f"»{mp}« konnte nicht ausgehängt werden: {r.stderr.strip() or 'wird benutzt'}")
+
+        # --- Öffnen --------------------------------------------------------------
+        path = f"/dev/{self.disk}"
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_DIRECT | os.O_EXCL)
+        except OSError as e:
+            msg = f"{path} konnte nicht geöffnet werden: {e.strerror}."
+            if e.errno == errno.EBUSY:
+                msg += " Das Laufwerk wird noch benutzt – bitte in anderen Programmen auswerfen."
+            raise Failed(msg)
+
+        try:
+            size = os.lseek(fd, 0, os.SEEK_END)
+            if size <= 0:
+                size = self.expected_size
+            if size <= 0:
+                raise Failed("Die Größe des Laufwerks konnte nicht ermittelt werden.")
+            if self.expected_size and abs(size - self.expected_size) > 1024 * 1024:
+                raise Failed(f"Die Größe von {path} hat sich geändert ({fmt_bytes(size)} statt "
+                             f"{fmt_bytes(self.expected_size)}). Wurde das Laufwerk getauscht? Abbruch.")
+
+            wbuf = mmap.mmap(-1, CHUNK)   # seitenausgerichtet – nötig für O_DIRECT
+            rbuf = mmap.mmap(-1, CHUNK)
+
+            m = self.mode
+            self.status.diskSize = size
+            self.status.stepCount = m.step_count
+            self.status.bytesTotal = size * m.work_units
+            self.status.state = "running"
+            self.status.startedAt = time.time()
+            base = 0
+
+            for i, pattern in enumerate(m.passes):
+                self.status.step = i + 1
+                label = pattern_label(pattern)
+                self.status.phase = f"Durchgang {i + 1}: {label}" if len(m.passes) > 1 else label
+                self.write_status()
+                self.write_pass(fd, wbuf, size, pattern, base)
+                base += size
+
+            if m.verifies:
+                self.status.step = len(m.passes) + 1
+                self.status.phase = "Prüfen (gesamte Platte lesen)"
+                self.write_status()
+                try:
+                    self.verify_pass(fd, rbuf, size, m.passes[-1], base)
+                    self.status.verified = True
+                except Failed:
+                    self.status.verified = False
+                    raise
+
+            if m.trims:
+                self.status.step = m.step_count
+                self.status.phase = "TRIM – Blöcke freigeben"
+                self.write_status()
+                self.status.trimResult = self.trim_all(fd, size)
+        finally:
+            os.close(fd)
+
+        return self.finish("done", "Alle Sektoren wurden überschrieben und die Prüfung war erfolgreich."
+                           if self.mode.verifies else "Alle Sektoren wurden mit Zufallsdaten überschrieben.")
+
+    # -- Durchgänge ---------------------------------------------------------------
+
+    def seeded_bytes(self, n: int, offset: int) -> bytes:
+        return random.Random(self.seed ^ (offset * 0x9E3779B97F4A7C15 & 0xFFFFFFFFFFFFFFFF)).randbytes(n)
+
+    def write_pass(self, fd, buf, size, pattern, base):
+        if pattern == ZEROS:
+            buf[:] = bytes(CHUNK)
+        view = memoryview(buf)
+        offset = 0
+        while offset < size:
+            self.check_cancel()
+            n = min(CHUNK, size - offset)
+            if pattern == RANDOM:
+                buf[:n] = os.urandom(n)
+            elif pattern == SEEDED:
+                buf[:n] = self.seeded_bytes(n, offset)
+            done = 0
+            while done < n:
+                try:
+                    w = os.pwrite(fd, view[done:n], offset + done)
+                except InterruptedError:
+                    continue
+                except OSError as e:
+                    raise Failed(f"Schreibfehler bei {fmt_bytes(offset + done)} von {fmt_bytes(size)}: "
+                                 f"{e.strerror}. Laufwerk getrennt oder defekt?")
+                if w == 0:
+                    raise Failed(f"Das Laufwerk nimmt bei {fmt_bytes(offset)} keine Daten mehr an.")
+                done += w
+            offset += n
+            self.report(base + offset)
+        os.fsync(fd)   # Schreib-Cache der Platte leeren
+
+    def verify_pass(self, fd, buf, size, pattern, base):
+        view = memoryview(buf)
+        zero = bytes(CHUNK)
+        offset = 0
+        while offset < size:
+            self.check_cancel()
+            n = min(CHUNK, size - offset)
+            done = 0
+            while done < n:
+                try:
+                    r = os.preadv(fd, [view[done:n]], offset + done)
+                except InterruptedError:
+                    continue
+                except OSError as e:
+                    raise Failed(f"Lesefehler bei der Prüfung ({fmt_bytes(offset + done)}): {e.strerror}.")
+                if r == 0:
+                    raise Failed(f"Die Platte lieferte bei {fmt_bytes(offset)} keine Daten mehr.")
+                done += r
+            expected = self.seeded_bytes(n, offset) if pattern == SEEDED else zero[:n]
+            if buf[:n] != expected:
+                raise Failed(f"Prüfung FEHLGESCHLAGEN: Im Bereich ab {fmt_bytes(offset)} stehen noch Daten, "
+                             "die nicht überschrieben wurden. Das Laufwerk (oder der Adapter) arbeitet nicht zuverlässig.")
+            offset += n
+            self.report(base + offset)
+
+    def trim_all(self, fd, size) -> str:
+        offset = 0
+        last = 0.0
+        while offset < size:
+            self.check_cancel()
+            length = min(TRIM_STEP, size - offset)
+            try:
+                fcntl.ioctl(fd, BLKDISCARD, struct.pack("QQ", offset, length))
+            except OSError as e:
+                if offset == 0:
+                    return f"vom Laufwerk bzw. USB-Adapter nicht unterstützt ({e.strerror}) – übersprungen"
+                return f"teilweise durchgeführt ({fmt_bytes(offset)} freigegeben, dann: {e.strerror})"
+            offset += length
+            if time.time() - last >= 1:
+                last = time.time()
+                self.status.phase = f"TRIM – Blöcke freigeben ({int(offset / size * 100)} %)"
+                self.write_status()
+        return "durchgeführt – alle Blöcke freigegeben"
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="WipeKit Lösch-Prozess")
+    p.add_argument("--disk", required=True)
+    p.add_argument("--mode", required=True)
+    p.add_argument("--job-dir", required=True)
+    p.add_argument("--expected-size", type=int, default=0)
+    a = p.parse_args()
+    # Arbeitsordner muss ein echter Ordner unter /tmp/wipekit-<uid>/ sein (kein Symlink)
+    job_dir = os.path.abspath(a.job_dir)
+    parent = os.path.dirname(job_dir)
+    if (not os.path.basename(parent).startswith("wipekit-") or os.path.dirname(parent) != "/tmp"
+            or os.path.islink(job_dir) or os.path.islink(parent) or not os.path.isdir(job_dir)):
+        return 2
+    return Engine(a.disk, a.mode, job_dir, a.expected_size).run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
