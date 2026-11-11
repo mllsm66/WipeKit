@@ -1030,6 +1030,34 @@ class WipeKitApp(Adw.Application):
         import tempfile
         import traceback
         w = self.window
+        shots = os.environ.get("WIPEKIT_SHOTS")
+
+        def settle():
+            ctx = GLib.MainContext.default()
+            end = time.time() + 0.6
+            while time.time() < end:
+                while ctx.pending():
+                    ctx.iteration(False)
+                time.sleep(0.02)
+
+        def shot(name):
+            if not shots:
+                return
+            settle()
+            try:
+                os.makedirs(shots, exist_ok=True)
+                paintable = Gtk.WidgetPaintable.new(w)
+                snap = Gtk.Snapshot()
+                paintable.snapshot(snap, w.get_width(), w.get_height())
+                node = snap.to_node()
+                if node is None:
+                    print("Screenshot leer:", name)
+                    return
+                tex = w.get_renderer().render_texture(node, None)
+                tex.save_to_png(os.path.join(shots, name + ".png"))
+            except Exception as e:  # Screenshots sind optional
+                print("Screenshot fehlgeschlagen:", name, e)
+
         try:
             w.disks = [
                 Disk("sdx", "/dev/sdx", "Test SSD", 500_000_000_000, "USB", True, ["Daten"], [], [], False),
@@ -1045,6 +1073,12 @@ class WipeKitApp(Adw.Application):
                     for m in MODES:
                         w.mode_key = m.key
                         w.update_mode_detail(d)
+            w.select(("disk", "sdx"))
+            w.show_detail()
+            shot("linux-1-ssd")
+            w.select(("disk", "sdy"))
+            w.show_detail()
+            shot("linux-2-festplatte")
             tmp = Path(tempfile.mkdtemp())
             for state in ("starting", "running", "done", "failed", "cancelled"):
                 info = {"id": "smoke-" + state, "disk": asdict(w.disks[0]), "mode": "ssd", "createdAt": time.time() - 100}
@@ -1063,9 +1097,14 @@ class WipeKitApp(Adw.Application):
                 w.select(("job", j.id))
                 w.show_detail()
                 w.update_job_page()
+                if state == "running":
+                    w.update_sleep_status()
+                    shot("linux-3-loeschen")
                 if not j.active:
                     w.job_finished(j, notify=False)
                     w.show_detail()
+                    if state == "done":
+                        shot("linux-4-fertig")
             w.update_sleep_status()
             w.tick()
             self.smoke_ok = True
