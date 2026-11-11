@@ -31,7 +31,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), pkexec | policykit-1, util-linux
+Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), adwaita-icon-theme, pkexec | policykit-1, util-linux
 Maintainer: mllsm66 <mllsm66@users.noreply.github.com>
 Homepage: https://github.com/mllsm66/WipeKit
 Description: Externe Laufwerke sicher löschen
