@@ -1112,6 +1112,29 @@ Erstellt mit WipeKit {version} (Windows)
 
         // --- Automatische Prüfung der Oberfläche (GitHub-Build) -------------------------------------
 
+        void SaveShot(string name)
+        {
+            string dir = Environment.GetEnvironmentVariable("WIPEKIT_SHOTS");
+            if (string.IsNullOrEmpty(dir) || Content is not FrameworkElement root) return;
+            Directory.CreateDirectory(dir);
+            root.UpdateLayout();
+            double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+            int w = (int)Math.Ceiling(root.ActualWidth * scale), h = (int)Math.Ceiling(root.ActualHeight * scale);
+            var visual = new DrawingVisual();
+            using (var dc = visual.RenderOpen())
+            {
+                var bg = TryFindResource("SolidBackgroundFillColorBaseBrush") as Brush ?? Brushes.White;
+                dc.DrawRectangle(bg, null, new Rect(0, 0, root.ActualWidth, root.ActualHeight));
+                dc.DrawRectangle(new VisualBrush(root), null, new Rect(0, 0, root.ActualWidth, root.ActualHeight));
+            }
+            var bmp = new RenderTargetBitmap(w, h, 96 * scale, 96 * scale, PixelFormats.Pbgra32);
+            bmp.Render(visual);
+            var enc = new PngBitmapEncoder();
+            enc.Frames.Add(BitmapFrame.Create(bmp));
+            using var fs = File.Create(Path.Combine(dir, name + ".png"));
+            enc.Save(fs);
+        }
+
         void RunSmokeTest()
         {
             try
@@ -1134,6 +1157,12 @@ Erstellt mit WipeKit {version} (Windows)
                         _modeUpdater?.Invoke();
                     }
                 }
+                Select("disk", "3");
+                ShowDetail();
+                SaveShot("windows-1-ssd");
+                Select("disk", "4");
+                ShowDetail();
+                SaveShot("windows-2-festplatte");
                 foreach (var state in new[] { JobState.Starting, JobState.Running, JobState.Done, JobState.Failed, JobState.Cancelled })
                 {
                     var job = new WipeJob(disks[0], WipeMode.ByKey("ssd"));
@@ -1144,6 +1173,8 @@ Erstellt mit WipeKit {version} (Windows)
                     RebuildJobList();
                     ShowDetail();
                     _detailUpdater?.Invoke();
+                    if (state == JobState.Running) { UpdateSleepStatus(); SaveShot("windows-3-loeschen"); }
+                    if (state == JobState.Done) SaveShot("windows-4-fertig");
                 }
                 UpdateSleepStatus();
                 Application.Current.Shutdown(0);

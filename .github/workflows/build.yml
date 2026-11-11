@@ -80,12 +80,20 @@ jobs:
       - name: Oberfläche prüfen
         shell: pwsh
         run: |
+          $env:WIPEKIT_SHOTS = "$PWD\screenshots"
           $p = Start-Process -FilePath dist\win\WipeKit.exe -ArgumentList '--smoke-test' -Wait -PassThru
           $log = Join-Path $env:TEMP 'WipeKit-Smoke.log'
           if (Test-Path $log) { Get-Content $log }
           $err = Join-Path $env:TEMP 'WipeKit-Fehler.log'
           if (Test-Path $err) { Get-Content $err }
           if ($p.ExitCode -ne 0) { throw "Oberflächen-Test fehlgeschlagen (Code $($p.ExitCode))" }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Screenshots-Windows
+          path: screenshots/
+          if-no-files-found: ignore
 
       - name: Installer bauen
         shell: pwsh
@@ -136,7 +144,16 @@ jobs:
           python3 -c "import ast,sys; ast.parse(open('linux/wipekit/wipekit-helper').read())"
 
       - name: Oberfläche prüfen
-        run: xvfb-run -a dbus-run-session -- python3 linux/wipekit/wipekit_gui.py --smoke-test
+        env:
+          WIPEKIT_SHOTS: ${{ github.workspace }}/screenshots
+        run: xvfb-run -a -s "-screen 0 1280x900x24" dbus-run-session -- python3 linux/wipekit/wipekit_gui.py --smoke-test
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Screenshots-Linux
+          path: screenshots/
+          if-no-files-found: ignore
 
       - name: Pakete bauen
         run: bash linux/build.sh "$VERSION"
