@@ -88,6 +88,11 @@ jobs:
           if (Test-Path $err) { Get-Content $err }
           if ($p.ExitCode -ne 0) { throw "Oberflächen-Test fehlgeschlagen (Code $($p.ExitCode))" }
 
+      - name: Screenshots ins Log schreiben
+        if: always()
+        shell: bash
+        run: for f in screenshots/*.png; do echo "SHOT-BEGIN $(basename $f)"; base64 -w 0 "$f"; echo; echo "SHOT-END"; done
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -147,6 +152,10 @@ jobs:
         env:
           WIPEKIT_SHOTS: ${{ github.workspace }}/screenshots
         run: xvfb-run -a -s "-screen 0 1280x900x24" dbus-run-session -- python3 linux/wipekit/wipekit_gui.py --smoke-test
+
+      - name: Screenshots ins Log schreiben
+        if: always()
+        run: for f in screenshots/*.png; do echo "SHOT-BEGIN $(basename $f)"; base64 -w 0 "$f"; echo; echo "SHOT-END"; done
 
       - uses: actions/upload-artifact@v4
         if: always()
