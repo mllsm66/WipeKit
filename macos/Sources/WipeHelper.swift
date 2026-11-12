@@ -77,10 +77,10 @@ enum WipeHelper {
         }
 
         // 2. Weg: direkt in eigener Sitzung starten
-        var attr: posix_spawnattr_t = nil
+        var attr: posix_spawnattr_t? = nil
         posix_spawnattr_init(&attr)
         posix_spawnattr_setflags(&attr, Int16(0x0400))   // POSIX_SPAWN_SETSID: eigene Sitzung
-        var actions: posix_spawn_file_actions_t = nil
+        var actions: posix_spawn_file_actions_t? = nil
         posix_spawn_file_actions_init(&actions)
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_addopen(&actions, 1, logPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
