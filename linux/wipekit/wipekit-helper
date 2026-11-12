@@ -36,7 +36,8 @@ class Failed(Exception):
 
 
 class Engine:
-    def __init__(self, disk: str, mode_key: str, job_dir: str, expected_size: int):
+    def __init__(self, disk: str, mode_key: str, job_dir: str, expected_size: int, allow_loop: bool = False):
+        self.allow_loop = allow_loop
         self.disk = disk
         self.mode = MODES_BY_KEY.get(mode_key)
         self.job_dir = job_dir
@@ -142,7 +143,7 @@ class Engine:
             raise Failed(f"Ungültige Laufwerkskennung »{self.disk}«.")
 
         # --- Sicherheitsprüfungen ------------------------------------------------
-        disks = {d.name: d for d in list_external_disks()}
+        disks = {d.name: d for d in list_external_disks(include_loop=self.allow_loop)}
         disk = disks.get(self.disk)
         if not disk:
             raise Failed(f"/dev/{self.disk} ist kein angeschlossenes externes Laufwerk (mehr).")
@@ -307,6 +308,7 @@ def main() -> int:
     p.add_argument("--mode", required=True)
     p.add_argument("--job-dir", required=True)
     p.add_argument("--expected-size", type=int, default=0)
+    p.add_argument("--allow-loop", action="store_true", help=argparse.SUPPRESS)   # nur für automatische Tests
     a = p.parse_args()
     # Arbeitsordner muss ein echter Ordner unter /tmp/wipekit-<uid>/ sein (kein Symlink)
     job_dir = os.path.abspath(a.job_dir)
@@ -314,7 +316,7 @@ def main() -> int:
     if (not os.path.basename(parent).startswith("wipekit-") or os.path.dirname(parent) != "/tmp"
             or os.path.islink(job_dir) or os.path.islink(parent) or not os.path.isdir(job_dir)):
         return 2
-    return Engine(a.disk, a.mode, job_dir, a.expected_size).run()
+    return Engine(a.disk, a.mode, job_dir, a.expected_size, allow_loop=a.allow_loop).run()
 
 
 if __name__ == "__main__":

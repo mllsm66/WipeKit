@@ -182,8 +182,11 @@ def _walk(node):
         yield from _walk(child)
 
 
-def list_external_disks() -> list:
-    """Entspricht ungefähr `diskutil list external physical` auf dem Mac."""
+def list_external_disks(include_loop: bool = False) -> list:
+    """Entspricht ungefähr `diskutil list external physical` auf dem Mac.
+
+    include_loop ist nur für automatische Tests gedacht (Loop-Geräte = Dateien, keine echten Laufwerke).
+    """
     try:
         out = subprocess.run(
             ["lsblk", "-J", "-b", "-o",
@@ -196,11 +199,12 @@ def list_external_disks() -> list:
 
     disks = []
     for d in devices:
-        if d.get("type") != "disk":
+        is_test_loop = include_loop and d.get("type") == "loop"
+        if d.get("type") != "disk" and not is_test_loop:
             continue
         tran = (d.get("tran") or "").lower()
         hotplug = _bool(d.get("hotplug")) or _bool(d.get("rm"))
-        if tran not in EXTERNAL_TRANSPORTS and not hotplug:
+        if tran not in EXTERNAL_TRANSPORTS and not hotplug and not is_test_loop:
             continue
         try:
             size = int(d.get("size") or 0)
@@ -219,6 +223,11 @@ def list_external_disks() -> list:
 
         volumes, mounts, holders = [], [], []
         protected = False
+        # Dateisystem direkt auf dem Gerät (ohne Partitionstabelle, z. B. bei manchen USB-Sticks)
+        if d.get("label"):
+            volumes.append(d["label"])
+        if d.get("mountpoint"):
+            mounts.append(d["mountpoint"])
         for child in _walk(d):
             if child.get("label"):
                 volumes.append(child["label"])
@@ -234,6 +243,8 @@ def list_external_disks() -> list:
 
         model = " ".join(x for x in [(d.get("vendor") or "").strip(), (d.get("model") or "").strip()] if x)
         bus = {"usb": "USB", "ieee1394": "FireWire", "mmc": "SD", "sdio": "SD"}.get(tran, tran.upper() or "?")
+        if is_test_loop:
+            bus = "Test"
         disks.append(Disk(
             name=d.get("name", ""), path=d.get("path") or "/dev/" + d.get("name", ""),
             model=model or "Unbekanntes Laufwerk", size=size, bus=bus, is_ssd=is_ssd,

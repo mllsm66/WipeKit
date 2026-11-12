@@ -13,6 +13,9 @@ namespace WipeKit
     {
         static readonly string[] ExternalBuses = { "USB", "SD", "MMC", "1394" };
 
+        /// <summary>Nur für automatische Tests: virtuelle Festplatten (VHD) zulassen.</summary>
+        internal static bool AllowVirtualForTests;
+
         const string ListScript = @"
 $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -52,7 +55,8 @@ $vols = @(Get-Partition | Where-Object { [int]$_.DriveLetter -ne 0 } | ForEach-O
             foreach (var d in Items(root, "Disks"))
             {
                 string bus = Str(d, "Bus");
-                if (!ExternalBuses.Contains(bus, StringComparer.OrdinalIgnoreCase)) continue;
+                bool testDisk = AllowVirtualForTests && bus == "File Backed Virtual";
+                if (!ExternalBuses.Contains(bus, StringComparer.OrdinalIgnoreCase) && !testDisk) continue;
                 long size = Long(d, "Size");
                 if (size <= 0) continue;   // z. B. leerer Kartenleser
                 int number = Int(d, "Number");
@@ -70,25 +74,6 @@ $vols = @(Get-Partition | Where-Object { [int]$_.DriveLetter -ne 0 } | ForEach-O
                 });
             }
             return result.OrderBy(x => x.Number).ToList();
-        }
-
-        /// <summary>Entfernt Partitionen und nimmt den Datenträger offline, damit Windows das Überschreiben zulässt.</summary>
-        public static void PrepareForWipe(int number)
-        {
-            RunPowerShell($@"
-$ErrorActionPreference = 'SilentlyContinue'
-Set-Disk -Number {number} -IsReadOnly $false
-Clear-Disk -Number {number} -RemoveData -RemoveOEM -Confirm:$false
-Set-Disk -Number {number} -IsOffline $true
-");
-        }
-
-        public static void SetOnline(int number)
-        {
-            RunPowerShell($@"
-$ErrorActionPreference = 'SilentlyContinue'
-Set-Disk -Number {number} -IsOffline $false
-");
         }
 
         public static string RunPowerShell(string script, int timeoutMs = 120000)
