@@ -1,28 +1,141 @@
 import Foundation
 import IOKit.pwr_mgt
 
-/// Läuft als root (gestartet über die Administrator-Passwortabfrage).
-/// Schreibt Fortschritt nach <job-dir>/status.json, bricht ab, sobald <job-dir>/cancel existiert.
+/// Lösch-Prozess. Läuft als root (gestartet über die Administrator-Passwortabfrage).
+///
+/// Ablauf:  App → (Passwort) → `--wipe-helper` (Starter) → startet `--wipe-worker` in einer eigenen
+/// Sitzung und kehrt sofort zurück. Der Worker löscht, schreibt den Fortschritt nach
+/// <job-dir>/status.json und bricht ab, sobald <job-dir>/cancel existiert.
+/// Ausgaben landen in <job-dir>/helper.log.
 enum WipeHelper {
-    static func run(arguments: [String]) -> Int32 {
+    static func parse(_ arguments: [String]) -> [String: String] {
         var opts: [String: String] = [:]
         var i = 0
         while i < arguments.count {
-            if arguments[i].hasPrefix("--"), i + 1 < arguments.count {
-                opts[String(arguments[i].dropFirst(2))] = arguments[i + 1]
-                i += 2
+            let a = arguments[i]
+            if a.hasPrefix("--") {
+                if i + 1 < arguments.count, !arguments[i + 1].hasPrefix("--") {
+                    opts[String(a.dropFirst(2))] = arguments[i + 1]
+                    i += 2
+                } else {
+                    opts[String(a.dropFirst(2))] = "1"
+                    i += 1
+                }
             } else {
                 i += 1
             }
         }
+        return opts
+    }
+
+    /// Starter: übergibt den eigentlichen Lösch-Prozess an launchd (läuft dann völlig unabhängig von
+    /// App und Passwortabfrage weiter) und beendet sich sofort. Notfalls direkter Start in eigener Sitzung.
+    static func launch(arguments: [String]) -> Int32 {
+        let opts = parse(arguments)
+        guard let dirPath = opts["job-dir"], !dirPath.isEmpty else {
+            FileHandle.standardError.write("Kein Arbeitsordner angegeben.\n".data(using: .utf8)!)
+            return 2
+        }
+        let dir = URL(fileURLWithPath: dirPath, isDirectory: true)
+        let logPath = dir.appendingPathComponent("helper.log").path
+        let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        let label = "io.github.mllsm66.wipekit.job." + dir.lastPathComponent.filter { $0.isLetter || $0.isNumber || $0 == "-" }
+        appendLog(logPath, "Starter: \(exe) (euid \(geteuid()))")
+
+        // 1. Weg: launchd (empfohlen)
+        let workerArgs = [exe, "--wipe-worker"] + arguments + ["--launchd-label", label]
+        let plist: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": workerArgs,
+            "RunAtLoad": true,
+            "KeepAlive": false,
+            "ProcessType": "Interactive",
+            "AbandonProcessGroup": true,
+            "StandardOutPath": logPath,
+            "StandardErrorPath": logPath,
+        ]
+        let plistPath = "/private/var/tmp/\(label).plist"
+        if let data = try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0) {
+            unlink(plistPath)
+            let fd = open(plistPath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644)
+            if fd >= 0 {
+                _ = data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+                fchmod(fd, 0o644)
+                close(fd)
+                _ = Shell.run("/bin/launchctl", ["bootout", "system/\(label)"])   // falls ein alter Eintrag existiert
+                let r = Shell.runWithOutput("/bin/launchctl", ["bootstrap", "system", plistPath])
+                unlink(plistPath)
+                if r.status == 0 {
+                    appendLog(logPath, "Starter: an launchd übergeben (\(label))")
+                    print("Lösch-Prozess über launchd gestartet")
+                    return 0
+                }
+                appendLog(logPath, "Starter: launchctl bootstrap fehlgeschlagen (\(r.status)): \(r.output)")
+            } else {
+                appendLog(logPath, "Starter: plist konnte nicht angelegt werden: \(String(cString: strerror(errno)))")
+            }
+        }
+
+        // 2. Weg: direkt in eigener Sitzung starten
+        var attr: posix_spawnattr_t = nil
+        posix_spawnattr_init(&attr)
+        posix_spawnattr_setflags(&attr, Int16(0x0400))   // POSIX_SPAWN_SETSID: eigene Sitzung
+        var actions: posix_spawn_file_actions_t = nil
+        posix_spawn_file_actions_init(&actions)
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 1, logPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        posix_spawn_file_actions_adddup2(&actions, 1, 2)
+
+        let args = [exe, "--wipe-worker"] + arguments
+        var cargs: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
+        cargs.append(nil)
+        var pid: pid_t = 0
+        let result = posix_spawn(&pid, exe, &actions, &attr, cargs, environ)
+        for p in cargs { free(p) }
+        posix_spawn_file_actions_destroy(&actions)
+        posix_spawnattr_destroy(&attr)
+
+        if result != 0 {
+            let msg = "Der Lösch-Prozess konnte nicht gestartet werden: \(String(cString: strerror(result)))"
+            appendLog(logPath, "Starter: " + msg)
+            FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
+            let engine = WipeEngine(disk: opts["disk"] ?? "", mode: WipeMode(rawValue: opts["mode"] ?? ""),
+                                    dir: dir, expectedSize: 0)
+            engine.failEarly(msg)
+            return 1
+        }
+        appendLog(logPath, "Starter: direkt gestartet (PID \(pid))")
+        print("Lösch-Prozess gestartet (PID \(pid))")
+        return 0
+    }
+
+    static func appendLog(_ path: String, _ line: String) {
+        let fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o644)
+        guard fd >= 0 else { return }
+        let text = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
+        _ = text.withCString { write(fd, $0, strlen($0)) }
+        fchmod(fd, 0o644)
+        close(fd)
+    }
+
+    /// Worker: der eigentliche Löschvorgang.
+    static func run(arguments: [String]) -> Int32 {
+        let opts = parse(arguments)
         guard let dirPath = opts["job-dir"], !dirPath.isEmpty else { return 2 }
         let engine = WipeEngine(
             disk: opts["disk"] ?? "",
             mode: WipeMode(rawValue: opts["mode"] ?? ""),
             dir: URL(fileURLWithPath: dirPath, isDirectory: true),
-            expectedSize: UInt64(opts["expected-size"] ?? "") ?? 0
+            expectedSize: UInt64(opts["expected-size"] ?? "") ?? 0,
+            allowDiskImage: opts["allow-disk-image"] != nil
         )
-        return engine.run()
+        let code = engine.run()
+        // launchd-Eintrag wieder entfernen (beendet diesen Prozess – alles ist dann bereits erledigt)
+        if let label = opts["launchd-label"] {
+            fflush(stdout)
+            _ = Shell.run("/bin/launchctl", ["bootout", "system/\(label)"])
+        }
+        return code
     }
 }
 
@@ -64,8 +177,10 @@ final class WipeEngine {
     private var samples: [(Date, UInt64)] = []
     private var assertionID: IOPMAssertionID = 0
     private var hasAssertion = false
+    private let allowDiskImage: Bool
 
-    init(disk: String, mode: WipeMode?, dir: URL, expectedSize: UInt64) {
+    init(disk: String, mode: WipeMode?, dir: URL, expectedSize: UInt64, allowDiskImage: Bool = false) {
+        self.allowDiskImage = allowDiskImage
         self.disk = disk
         self.mode = mode
         self.dir = dir
@@ -81,8 +196,14 @@ final class WipeEngine {
         )
     }
 
+    /// Fehler, bevor der Worker überhaupt laufen konnte.
+    func failEarly(_ message: String) {
+        _ = finish(.failed, message)
+    }
+
     func run() -> Int32 {
         signal(SIGHUP, SIG_IGN)
+        print("WipeKit-Worker gestartet: \(disk), Modus \(mode?.rawValue ?? "?"), PID \(getpid())")
         writeStatus()
 
         guard geteuid() == 0 else { return finish(.failed, "Keine Administratorrechte.") }
@@ -97,12 +218,17 @@ final class WipeEngine {
         guard !protected.contains(disk) else {
             return finish(.failed, "\(disk) enthält das laufende macOS und wird niemals gelöscht.")
         }
-        let externals = (Shell.diskutilPlist(["list", "-plist", "external", "physical"])?["WholeDisks"] as? [String]) ?? []
-        guard externals.contains(disk) else {
-            return finish(.failed, "\(disk) ist kein angeschlossenes externes Laufwerk (mehr).")
-        }
-        if let info = Shell.diskutilPlist(["info", "-plist", disk]), (info["Internal"] as? Bool) == true {
-            return finish(.failed, "\(disk) ist ein internes Laufwerk – Abbruch.")
+        let info = Shell.diskutilPlist(["info", "-plist", disk]) ?? [:]
+        // Nur für die automatischen Tests: ein Disk-Image (niemals ein echtes Laufwerk)
+        let isTestImage = allowDiskImage && (info["BusProtocol"] as? String) == "Disk Image"
+        if !isTestImage {
+            let externals = (Shell.diskutilPlist(["list", "-plist", "external", "physical"])?["WholeDisks"] as? [String]) ?? []
+            guard externals.contains(disk) else {
+                return finish(.failed, "\(disk) ist kein angeschlossenes externes Laufwerk (mehr).")
+            }
+            if (info["Internal"] as? Bool) == true {
+                return finish(.failed, "\(disk) ist ein internes Laufwerk – Abbruch.")
+            }
         }
 
         // --- Ruhezustand verhindern (Display darf ausgehen) -----------------------------------
@@ -340,17 +466,31 @@ final class WipeEngine {
         writeStatus()
     }
 
+    /// Schreibt status.json atomar (temporäre Datei im selben Ordner + rename).
     private func writeStatus() {
         status.updatedAt = Date()
         lastStatusWrite = status.updatedAt
         guard let data = try? JSONEncoder().encode(status) else { return }
-        let url = dir.appendingPathComponent("status.json")
-        if (try? data.write(to: url, options: .atomic)) != nil {
-            chmod(url.path, 0o644)
+        let finalPath = dir.appendingPathComponent("status.json").path
+        let tmpPath = dir.appendingPathComponent(".status.json.tmp").path
+        let fd = open(tmpPath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o644)
+        guard fd >= 0 else {
+            print("status.json konnte nicht geschrieben werden: \(String(cString: strerror(errno)))")
+            return
+        }
+        let ok = data.withUnsafeBytes { buf -> Bool in
+            guard let base = buf.baseAddress else { return false }
+            return write(fd, base, buf.count) == buf.count
+        }
+        fchmod(fd, 0o644)
+        close(fd)
+        if ok {
+            rename(tmpPath, finalPath)
         }
     }
 
     private func finish(_ state: JobState, _ message: String) -> Int32 {
+        print("Ende: \(state.rawValue) – \(message)")
         if hasAssertion {
             IOPMAssertionRelease(assertionID)   // ab jetzt darf der Mac wieder schlafen
             hasAssertion = false

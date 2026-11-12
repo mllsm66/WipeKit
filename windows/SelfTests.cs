@@ -43,6 +43,29 @@ namespace WipeKit
             }
         }
 
+        /// <summary>Löscht einen echten (virtuellen) Datenträger mit eingehängtem Laufwerk – wie im Alltag.</summary>
+        public static int DiskTest(int number, string modeKey)
+        {
+            string log = Path.Combine(Path.GetTempPath(), "WipeKit-DiskTest.log");
+            try
+            {
+                DiskService.AllowVirtualForTests = true;
+                var disk = DiskService.ListExternalDisks().Find(d => d.Number == number);
+                if (disk == null) throw new Exception($"Datenträger {number} nicht gefunden");
+                File.AppendAllText(log, $"Datenträger: {disk.Name}, {disk.Size} Bytes, Volumes: {string.Join(", ", disk.Volumes)}\n");
+                var job = new WipeJob(disk, WipeMode.ByKey(modeKey));
+                job.Start();
+                job.Join(TimeSpan.FromMinutes(10));
+                File.AppendAllText(log, $"Ergebnis: {job.State} – {job.Message} (Prüfung: {job.Verified}, TRIM: {job.TrimResult ?? "–"})\n");
+                return job.State == JobState.Done && (!job.Mode.Verifies || job.Verified == true) ? 0 : 1;
+            }
+            catch (Exception e)
+            {
+                File.AppendAllText(log, "FEHLER: " + e + "\n");
+                return 1;
+            }
+        }
+
         static SafeFileHandle Open(string path)
         {
             var h = Native.CreateFile(path, Native.GENERIC_READ | Native.GENERIC_WRITE,

@@ -30,6 +30,25 @@ jobs:
       - name: "App bauen (Universal – Intel + Apple Silicon)"
         run: bash macos/build.sh
 
+      - name: Echtes Löschen testen (eingehängtes Disk-Image, als root)
+        run: |
+          hdiutil create -size 48m -fs HFS+ -volname WKTEST -o "$RUNNER_TEMP/wk.dmg"
+          DEV=$(hdiutil attach "$RUNNER_TEMP/wk.dmg" | head -1 | awk '{print $1}' | sed 's#/dev/##')
+          echo "Disk-Image: $DEV"; diskutil list "$DEV"
+          BASE="/private/tmp/WipeKit-$(id -u)"; JOB="$BASE/ci-test"
+          mkdir -p "$JOB"; chmod 700 "$BASE" "$JOB"
+          sudo macos/build/WipeKit.app/Contents/MacOS/WipeKit --wipe-helper --disk "$DEV" --mode ssd --job-dir "$JOB" --allow-disk-image
+          STATE=none
+          for i in $(seq 1 90); do
+            STATE=$(python3 -c "import json;print(json.load(open('$JOB/status.json'))['state'])" 2>/dev/null || echo none)
+            case "$STATE" in done|failed|cancelled) break;; esac
+            sleep 2
+          done
+          echo "--- status.json"; cat "$JOB/status.json" || true
+          echo; echo "--- helper.log"; cat "$JOB/helper.log" || true
+          hdiutil detach "/dev/$DEV" -force || true
+          test "$STATE" = "done"
+
       - name: ZIP erstellen
         run: |
           mkdir -p dist
@@ -95,6 +114,29 @@ jobs:
           path: screenshots/
           if-no-files-found: ignore
 
+      - name: Echtes Löschen testen (virtuelle Festplatte mit eingehängtem NTFS-Laufwerk)
+        shell: pwsh
+        run: |
+          $vhd = "$env:RUNNER_TEMP\wk.vhdx"
+          $script = @"
+          create vdisk file="$vhd" maximum=64 type=expandable
+          select vdisk file="$vhd"
+          attach vdisk
+          convert gpt
+          create partition primary
+          format fs=ntfs quick label=WKTEST
+          assign letter=W
+          "@
+          Set-Content -Path "$env:RUNNER_TEMP\dp.txt" -Value $script -Encoding ascii
+          diskpart /s "$env:RUNNER_TEMP\dp.txt"
+          Set-Content -Path W:\test.txt -Value 'Testdaten'
+          $num = (Get-DiskImage -ImagePath $vhd | Get-Disk).Number
+          Write-Host "Testdatenträger: $num"
+          $p = Start-Process -FilePath dist\win\WipeKit.exe -ArgumentList '--disk-test', $num, 'secure' -Wait -PassThru
+          $log = Join-Path $env:TEMP 'WipeKit-DiskTest.log'
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) { throw "Löschtest fehlgeschlagen (Code $($p.ExitCode))" }
+
       - name: Installer bauen
         shell: pwsh
         run: |
@@ -154,6 +196,20 @@ jobs:
           name: Screenshots-Linux
           path: screenshots/
           if-no-files-found: ignore
+
+      - name: Echtes Löschen testen (eingehängtes Loop-Gerät, als root)
+        run: |
+          truncate -s 64M "$RUNNER_TEMP/wk.img"
+          LOOP=$(sudo losetup --show -f "$RUNNER_TEMP/wk.img")
+          sudo mkfs.ext4 -q "$LOOP"
+          sudo mkdir -p /mnt/wktest && sudo mount "$LOOP" /mnt/wktest
+          echo "Testdaten" | sudo tee /mnt/wktest/test.txt > /dev/null
+          BASE="/tmp/wipekit-$(id -u)"; JOB="$BASE/ci-test"
+          mkdir -p "$JOB"; chmod 700 "$BASE" "$JOB"
+          sudo python3 linux/wipekit/wipekit-helper --disk "$(basename "$LOOP")" --mode ssd --job-dir "$JOB" --allow-loop || true
+          echo "--- status.json"; cat "$JOB/status.json"; echo
+          sudo losetup -d "$LOOP" || true
+          python3 -c "import json,sys; s=json.load(open('$JOB/status.json')); sys.exit(0 if s['state']=='done' and s['verified'] else 1)"
 
       - name: Pakete bauen
         run: bash linux/build.sh "$VERSION"

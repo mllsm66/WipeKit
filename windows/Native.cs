@@ -45,5 +45,20 @@ namespace WipeKit
 
         [DllImport("kernel32.dll")]
         public static extern uint SetThreadExecutionState(uint flags);
+
+        public const uint IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000;
+        public const uint FSCTL_LOCK_VOLUME = 0x00090018;
+        public const uint FSCTL_DISMOUNT_VOLUME = 0x00090020;
+        public const uint IOCTL_DISK_UPDATE_PROPERTIES = 0x00070140;
+        public const int ERROR_MORE_DATA = 234;
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "FindFirstVolumeW")]
+        public static extern IntPtr FindFirstVolume(System.Text.StringBuilder name, int length);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "FindNextVolumeW")]
+        public static extern bool FindNextVolume(IntPtr handle, System.Text.StringBuilder name, int length);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool FindVolumeClose(IntPtr handle);
     }
 }

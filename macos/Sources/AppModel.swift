@@ -78,11 +78,11 @@ final class WipeJob: ObservableObject, Identifiable {
             message = s.message
             if s.state.isActive && !WipeJob.pidAlive(s.pid) && now.timeIntervalSince(s.updatedAt) > 10 {
                 state = .failed
-                message = "Der Löschprozess wurde unerwartet beendet (Absturz oder Neustart?). Das Laufwerk ist nur teilweise überschrieben."
+                message = "Der Löschprozess wurde unerwartet beendet (Absturz oder Neustart?). Das Laufwerk ist nur teilweise überschrieben." + logTail()
             }
-        } else if let l = launchedAt, now.timeIntervalSince(l) > 45 {
+        } else if let l = launchedAt, now.timeIntervalSince(l) > 30 {
             state = .failed
-            message = "Der Löschprozess konnte nicht gestartet werden."
+            message = "Der Löschprozess konnte nicht gestartet werden." + logTail()
         }
         if !state.isActive { finish() }
     }
@@ -92,6 +92,15 @@ final class WipeJob: ObservableObject, Identifiable {
         finishedHandled = true
         stop()
         onFinish?(self)
+    }
+
+    /// Letzte Zeilen aus helper.log für Fehlermeldungen.
+    func logTail() -> String {
+        guard let text = try? String(contentsOf: dir.appendingPathComponent("helper.log"), encoding: .utf8) else {
+            return "\n\n(Kein Protokoll des Löschprozesses vorhanden – er wurde vermutlich gar nicht gestartet.)"
+        }
+        let lines = text.split(separator: "\n").suffix(6).joined(separator: "\n")
+        return lines.isEmpty ? "" : "\n\nDetails:\n" + lines
     }
 
     static func pidAlive(_ pid: Int32) -> Bool {
@@ -216,6 +225,11 @@ final class AppModel: ObservableObject {
 
     private func start(disk: ExternalDisk, mode: WipeMode) {
         guard !disk.isProtected else { return }
+        if (Bundle.main.executablePath ?? "").contains("/AppTranslocation/") {
+            enqueueAlert("Bitte WipeKit in »Programme« bewegen",
+                         "macOS führt WipeKit gerade aus einem geschützten Zwischenordner aus. Bitte beende WipeKit, ziehe die App in den Ordner »Programme« und starte sie von dort.")
+            return
+        }
         guard !isBusy(disk) else {
             enqueueAlert("Läuft bereits", "\(disk.id) wird bereits gelöscht.")
             return
@@ -243,13 +257,17 @@ final class AppModel: ObservableObject {
                      "--mode", mode.rawValue,
                      "--job-dir", dir.path,
                      "--expected-size", String(disk.size)]
-        let command = "/usr/bin/nohup " + parts.map(AppModel.shellQuote).joined(separator: " ") + " >/dev/null 2>&1 &"
+        // Der Starter übergibt den Löschvorgang an launchd und kehrt sofort zurück
+        let command = parts.map(AppModel.shellQuote).joined(separator: " ") + " 2>&1"
         let prompt = "WipeKit möchte »\(disk.name)« (\(disk.id), \(Fmt.bytes(disk.size))) unwiderruflich löschen."
         let source = "do shell script \"\(AppModel.appleScriptEscape(command))\" with prompt \"\(AppModel.appleScriptEscape(prompt))\" with administrator privileges"
 
         var errorInfo: NSDictionary?
         let script = NSAppleScript(source: source)
-        _ = script?.executeAndReturnError(&errorInfo)
+        let output = script?.executeAndReturnError(&errorInfo)
+        if let out = output?.stringValue, !out.isEmpty {
+            NSLog("WipeKit-Starter: %@", out)
+        }
 
         if let e = errorInfo {
             let code = (e[NSAppleScript.errorNumber] as? Int) ?? 0

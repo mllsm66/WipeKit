@@ -27,7 +27,6 @@ namespace WipeKit
         readonly List<(DateTime Time, long Bytes)> _samples = new List<(DateTime, long)>();
         DateTime _lastReport = DateTime.MinValue;
         volatile bool _cancel;
-        bool _prepared;
         Thread _thread;
 
         JobState _state = JobState.Starting;
@@ -185,11 +184,6 @@ namespace WipeKit
             }
 
             Native.SetThreadExecutionState(Native.ES_CONTINUOUS);   // Ruhezustand wieder erlauben
-            if (_prepared)
-            {
-                SetPhase("Laufwerk wird wieder freigegeben …");
-                try { DiskService.SetOnline(Disk.Number); } catch { }
-            }
             lock (_lock)
             {
                 _sleep = false;
@@ -212,11 +206,9 @@ namespace WipeKit
                 throw new WipeException($"Die Größe von {Disk.Id} hat sich geändert ({Fmt.Bytes(current.Size)} statt {Fmt.Bytes(Disk.Size)}). Wurde das Laufwerk getauscht? Abbruch aus Sicherheitsgründen.");
             CheckCancel();
 
-            SetPhase("Laufwerk wird vorbereitet …");
-            _prepared = true;
-            DiskService.PrepareForWipe(Disk.Number);
-            CheckCancel();
-
+            // Alle Volumes (Laufwerksbuchstaben) des Datenträgers sperren und aushängen.
+            // Ohne Sperre verweigert Windows das Überschreiben (»Zugriff verweigert«).
+            SetPhase("Laufwerk wird ausgehängt …");
             using var handle = Native.CreateFile(Disk.DevicePath, Native.GENERIC_READ | Native.GENERIC_WRITE,
                 Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING,
                 Native.FILE_FLAG_NO_BUFFERING | Native.FILE_FLAG_WRITE_THROUGH, IntPtr.Zero);
@@ -228,7 +220,30 @@ namespace WipeKit
             if (Math.Abs(size - Disk.Size) > 1024 * 1024)
                 throw new WipeException($"Die Größe von {Disk.Id} passt nicht ({Fmt.Bytes(size)} statt {Fmt.Bytes(Disk.Size)}). Abbruch aus Sicherheitsgründen.");
 
-            ExecutePasses(handle, size);
+            var locker = VolumeLocker.LockAllOn(Disk.Number, () => _cancel);
+            try
+            {
+                CheckCancel();
+                try
+                {
+                    ExecutePasses(handle, size);
+                }
+                catch (WipeException e) when (locker.Problems.Count > 0)
+                {
+                    throw new WipeException(e.Message + " Hinweis: " + string.Join(" ", locker.Problems) +
+                        " Bitte alle Programme schließen, die auf das Laufwerk zugreifen, und erneut versuchen.");
+                }
+            }
+            finally
+            {
+                locker.Dispose();
+                UpdateDiskProperties(handle);   // Windows liest die (jetzt gelöschte) Partitionstabelle neu ein
+            }
+        }
+
+        static unsafe void UpdateDiskProperties(SafeFileHandle handle)
+        {
+            Native.DeviceIoControl(handle, Native.IOCTL_DISK_UPDATE_PROPERTIES, null, 0, null, 0, out _, IntPtr.Zero);
         }
 
         /// <summary>Alle Durchgänge, Prüfung und TRIM auf einem bereits geöffneten Laufwerk (oder einer Testdatei).</summary>

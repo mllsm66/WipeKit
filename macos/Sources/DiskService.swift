@@ -18,6 +18,20 @@ enum Shell {
         return (p.terminationStatus, data)
     }
 
+    /// Wie run, liefert aber zusätzlich Fehlerausgabe als Text.
+    static func runWithOutput(_ path: String, _ args: [String]) -> (status: Int32, output: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do { try p.run() } catch { return (-1, error.localizedDescription) }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus, String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+    }
+
     static func diskutilPlist(_ args: [String]) -> [String: Any]? {
         let r = run("/usr/sbin/diskutil", args)
         guard r.status == 0, !r.out.isEmpty else { return nil }

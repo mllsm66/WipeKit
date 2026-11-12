@@ -29,6 +29,12 @@ namespace WipeKit
                 return;
             }
 
+            if (args.Length >= 3 && args[0] == "--disk-test")
+            {
+                Shutdown(SelfTests.DiskTest(int.Parse(args[1]), args[2]));
+                return;
+            }
+
             bool smoke = args.Contains("--smoke-test");
             var window = new ShellWindow(smoke);
             MainWindow = window;
