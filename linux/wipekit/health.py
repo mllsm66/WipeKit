@@ -417,8 +417,8 @@ def friendly_reason(msgs) -> str:
         return "Für das Auslesen der Gesundheitsdaten fehlen die nötigen Rechte."
     if "smart support is: unavailable" in text or "smart support is: disabled" in text:
         return "Das Laufwerk unterstützt keine Gesundheitsdaten (S.M.A.R.T.) oder hat sie abgeschaltet."
-    if "no such device" in text or "open device" in text:
-        return "Das Laufwerk konnte nicht geöffnet werden – ist es noch angeschlossen?"
+    if "no such device" in text or "open device" in text or "unable to detect device type" in text:
+        return "Das Laufwerk konnte nicht abgefragt werden (Adapter oder Treiber unterstützt es nicht)."
     return "Für dieses Laufwerk sind keine Gesundheitsdaten (S.M.A.R.T.) verfügbar."
 
 

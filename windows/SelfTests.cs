@@ -14,17 +14,23 @@ namespace WipeKit
             try
             {
                 long size = 40L * 1024 * 1024 + 3 * 4096;   // absichtlich kein Vielfaches von 4 MiB
-                foreach (var key in new[] { "quick", "secure", "maximum", "ssd" })
+                foreach (var key in new[] { "quick", "secure", "maximum", "ssd", "check" })
                 {
                     using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))
                         fs.SetLength(size);
                     var mode = WipeMode.ByKey(key);
                     var job = new WipeJob(new DiskInfo { Number = -1, Name = "Testdatei", Size = size }, mode);
+                    string msg = "";
                     using (SafeFileHandle h = Open(path))
-                        job.ExecutePasses(h, size);
-                    if (mode.Verifies && job.Verified != true)
-                        throw new Exception($"{key}: Prüfung nicht bestanden");
-                    File.AppendAllText(log, $"{key}: ok (TRIM: {job.TrimResult ?? "–"})\n");
+                    {
+                        if (mode.ReadOnly) msg = job.ExecuteCheck(h, size);
+                        else job.ExecutePasses(h, size);
+                    }
+                    if (mode.Verify != VerifyKind.None && job.Verified != true)
+                        throw new Exception($"{key}: Prüfung nicht bestanden ({job.SampleResult})");
+                    if (mode.ReadOnly && job.NonZeroBytes != 0)
+                        throw new Exception($"{key}: leere Testdatei als »nicht leer« erkannt ({msg})");
+                    File.AppendAllText(log, $"{key}: ok (TRIM: {job.TrimResult ?? "–"}, Stichproben: {job.SampleResult ?? "–"}, Kurve: {job.Curve?.Count ?? 0} Punkte) {msg}\n");
                 }
 
                 // Eine nicht überschriebene Stelle muss erkannt werden
@@ -34,6 +40,27 @@ namespace WipeKit
                     throw new Exception("Manipulation wurde nicht erkannt");
                 File.AppendAllText(log, "Manipulation erkannt: ok\n");
                 File.Delete(path);
+                return 0;
+            }
+            catch (Exception e)
+            {
+                File.AppendAllText(log, "FEHLER: " + e + "\n");
+                return 1;
+            }
+        }
+
+        /// <summary>Liest die Gesundheitsdaten aller Laufwerke des Rechners (Test von smartctl).</summary>
+        public static int HealthTest()
+        {
+            string log = Path.Combine(Path.GetTempPath(), "WipeKit-HealthTest.log");
+            try
+            {
+                if (!SmartService.Available) throw new Exception("smartctl ist nicht eingebettet");
+                foreach (var d in DiskService.ListDisks())
+                {
+                    var (h, json, dev) = SmartService.Read(d);
+                    File.AppendAllText(log, $"{d.Id} ({d.Name}, {d.Bus}): {HealthParser.RatingText(h.Rating)} | {h.Model} | {(h.Available ? string.Join("; ", h.Reasons) : h.Reason)} | Typ: {dev}\n");
+                }
                 return 0;
             }
             catch (Exception e)
@@ -57,7 +84,7 @@ namespace WipeKit
                 job.Start();
                 job.Join(TimeSpan.FromMinutes(10));
                 File.AppendAllText(log, $"Ergebnis: {job.State} – {job.Message} (Prüfung: {job.Verified}, TRIM: {job.TrimResult ?? "–"})\n");
-                return job.State == JobState.Done && (!job.Mode.Verifies || job.Verified == true) ? 0 : 1;
+                return job.State == JobState.Done && (job.Mode.Verify == VerifyKind.None && !job.Mode.ReadOnly || job.Verified == true) ? 0 : 1;
             }
             catch (Exception e)
             {
@@ -100,7 +127,7 @@ namespace WipeKit
                 var verifyOnly = new WipeMode
                 {
                     Key = "verify", Title = "Prüfung", Glyph = "", Tagline = "",
-                    Passes = new Pattern[0], Verifies = true, Trims = false,
+                    Passes = new Pattern[0], Verify = VerifyKind.Full, Trims = false,
                 };
                 var job = new WipeJob(new DiskInfo { Number = -1, Name = "Testdatei", Size = _size }, verifyOnly);
                 try

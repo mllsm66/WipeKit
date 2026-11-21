@@ -32,6 +32,17 @@ enum SmartService {
         return (h, r.out)
     }
 
+    /// Liest mit Administratorrechten (Passwortabfrage) – für Laufwerke, die ohne Rechte nicht antworten.
+    static func readAsAdmin(_ diskID: String) -> (Health, Data)? {
+        guard DiskService.isValidWholeDiskID(diskID), let exe = smartctlPath else { return nil }
+        let cmd = "'\(exe.replacingOccurrences(of: "'", with: "'\\''"))' -x -j /dev/\(diskID) || true"
+        let source = "do shell script \"\(AppModel.appleScriptEscape(cmd))\" with prompt \"WipeKit möchte die Gesundheitsdaten von \(diskID) lesen. Es werden keine Daten verändert.\" with administrator privileges"
+        var err: NSDictionary?
+        guard let out = NSAppleScript(source: source)?.executeAndReturnError(&err).stringValue, err == nil else { return nil }
+        let data = Data(out.utf8)
+        return (HealthParser.parse(data: data), data)
+    }
+
     /// Startet einen Selbsttest (short, long, conveyance) oder bricht ihn ab (abort).
     static func selfTest(_ diskID: String, _ test: String) -> (Bool, String) {
         guard DiskService.isValidWholeDiskID(diskID), let exe = smartctlPath else { return (false, "smartctl fehlt.") }

@@ -698,6 +698,7 @@ final class WipeEngine {
         if diskValidated {
             status.phase = "Gesundheitsdaten werden gelesen …"
             saveSmart("smart-after.json")
+            status.phase = "Abgeschlossen"
         }
         if hasAssertion {
             IOPMAssertionRelease(assertionID)   // ab jetzt darf der Mac wieder schlafen

@@ -516,6 +516,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func readHealthAsAdmin(_ disk: ExternalDisk) {
+        let e = healthModel(disk.id)
+        e.loading = true
+        DispatchQueue.main.async {
+            if let r = SmartService.readAsAdmin(disk.id) {
+                e.health = r.0
+                e.raw = r.1
+                e.readAt = Date()
+            }
+            e.loading = false
+            self.objectWillChange.send()
+        }
+    }
+
     func refreshAllHealth() {
         for d in disks { ensureHealth(d, force: true) }
     }

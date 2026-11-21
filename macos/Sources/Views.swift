@@ -838,8 +838,13 @@ struct DiagnoseView: View {
 
     @ViewBuilder private func unavailable(_ h: Health) -> some View {
         Section {
-            Text(h.reason.isEmpty ? "Für dieses Laufwerk sind keine Gesundheitsdaten verfügbar." : h.reason)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .firstTextBaseline) {
+                Text(h.reason.isEmpty ? "Für dieses Laufwerk sind keine Gesundheitsdaten verfügbar." : h.reason)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Mit Administratorrechten lesen") { model.readHealthAsAdmin(disk) }
+                    .help("Manche Laufwerke antworten nur mit Administratorrechten.")
+            }
             if !disk.isInternal {
                 Text(MacInfo.usbExplanation)
                     .foregroundStyle(.secondary)

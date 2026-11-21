@@ -38,6 +38,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "..\dist\win\WipeKit.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; DestName: "THIRD-PARTY-NOTICES.txt"; Flags: ignoreversion
+Source: "..\licenses\GPL-2.0.txt"; DestDir: "{app}\Lizenzen"; DestName: "GPL-2.0 (smartmontools).txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\WipeKit"; Filename: "{app}\WipeKit.exe"

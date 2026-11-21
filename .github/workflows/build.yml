@@ -97,8 +97,8 @@ jobs:
         if: contains(github.event.head_commit.message, '[screenshots]')
         run: |
           for f in screenshots/*.png; do
-            sips -Z 1400 "$f" --out "$RUNNER_TEMP/s.png" >/dev/null
-            echo "===BEGIN $(basename "$f")==="; base64 -i "$RUNNER_TEMP/s.png" | tr -d '\n'; echo; echo "===END==="
+            sips -Z 1300 -s format jpeg -s formatOptions 82 "$f" --out "$RUNNER_TEMP/s.jpg" >/dev/null
+            echo "===BEGIN $(basename "$f" .png).jpg==="; base64 -b 120 -i "$RUNNER_TEMP/s.jpg"; echo "===END==="
           done
 
       - name: ZIP und Quelltext von smartmontools bereitstellen
@@ -134,6 +134,30 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; V="${V#v}"; else V="0.0.0"; fi
           echo "VERSION=${V}" >> "$GITHUB_ENV"
 
+      - name: smartctl (smartmontools 7.5) laden und prüfen
+        shell: pwsh
+        run: |
+          $url = "https://github.com/smartmontools/smartmontools/releases/download/RELEASE_7_5/smartmontools-7.5.win32-setup.exe"
+          New-Item -ItemType Directory -Force -Path windows\vendor, "$env:RUNNER_TEMP\sm" | Out-Null
+          Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP\sm-setup.exe"
+          Invoke-WebRequest "$url.md5" -OutFile "$env:RUNNER_TEMP\sm-setup.md5"
+          $want = ((Get-Content "$env:RUNNER_TEMP\sm-setup.md5" -Raw) -split '\s+')[0].ToLower()
+          $have = (Get-FileHash "$env:RUNNER_TEMP\sm-setup.exe" -Algorithm MD5).Hash.ToLower()
+          if ($want -ne $have) { throw "Prüfsumme stimmt nicht ($want / $have)" }
+          Write-Host "MD5 in Ordnung: $have · SHA-256: $((Get-FileHash "$env:RUNNER_TEMP\sm-setup.exe").Hash)"
+          & 7z x "$env:RUNNER_TEMP\sm-setup.exe" "-o$env:RUNNER_TEMP\sm" -y | Out-Null
+          $found = $null
+          foreach ($f in Get-ChildItem "$env:RUNNER_TEMP\sm" -Recurse -Filter smartctl.exe) {
+            $b = [IO.File]::ReadAllBytes($f.FullName)
+            $pe = [BitConverter]::ToInt32($b, 0x3C)
+            $machine = [BitConverter]::ToUInt16($b, $pe + 4)
+            Write-Host "$($f.FullName): Maschine 0x$('{0:X}' -f $machine)"
+            if ($machine -eq 0x8664) { $found = $f.FullName }
+          }
+          if (-not $found) { throw "64-Bit-smartctl.exe nicht gefunden" }
+          Copy-Item $found windows\vendor\smartctl.exe
+          & windows\vendor\smartctl.exe --version | Select-Object -First 2
+
       - name: Portable EXE bauen
         shell: bash
         run: >
@@ -149,9 +173,19 @@ jobs:
           if (Test-Path "$env:RUNNER_TEMP\wipetest.bin.log") { Get-Content "$env:RUNNER_TEMP\wipetest.bin.log" }
           if ($p.ExitCode -ne 0) { throw "Engine-Test fehlgeschlagen (Code $($p.ExitCode))" }
 
+      - name: Diagnose testen (smartctl, echte Laufwerke des Testrechners)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\win\WipeKit.exe -ArgumentList '--health-test' -Wait -PassThru
+          $log = Join-Path $env:TEMP 'WipeKit-HealthTest.log'
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) { throw "Diagnose-Test fehlgeschlagen (Code $($p.ExitCode))" }
+
       - name: Oberfläche prüfen
         shell: pwsh
         run: |
+          $env:WIPEKIT_FIXTURES = "$PWD\tests\fixtures"
+          $env:WIPEKIT_REPORTS = "$PWD\screenshots\berichte"
           $env:WIPEKIT_SHOTS = "$PWD\screenshots"
           $p = Start-Process -FilePath dist\win\WipeKit.exe -ArgumentList '--smoke-test' -Wait -PassThru
           $log = Join-Path $env:TEMP 'WipeKit-Smoke.log'
@@ -166,6 +200,30 @@ jobs:
           name: Screenshots-Windows
           path: screenshots/
           if-no-files-found: ignore
+
+      - name: Bildschirmfotos ins Protokoll schreiben
+        if: contains(github.event.head_commit.message, '[screenshots]')
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+          $ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
+          $ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]82)
+          foreach ($f in Get-ChildItem screenshots -Filter *.png) {
+            $img = [System.Drawing.Image]::FromFile($f.FullName)
+            $scale = [Math]::Min(1.0, 1300.0 / $img.Width)
+            $bmp = New-Object System.Drawing.Bitmap([int]($img.Width * $scale), [int]($img.Height * $scale))
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.InterpolationMode = 'HighQualityBicubic'
+            $g.DrawImage($img, 0, 0, $bmp.Width, $bmp.Height)
+            $out = Join-Path $env:RUNNER_TEMP ($f.BaseName + '.jpg')
+            $bmp.Save($out, $codec, $ep)
+            $g.Dispose(); $bmp.Dispose(); $img.Dispose()
+            Write-Output "===BEGIN $($f.BaseName).jpg==="
+            $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($out))
+            for ($i = 0; $i -lt $b64.Length; $i += 120) { Write-Output $b64.Substring($i, [Math]::Min(120, $b64.Length - $i)) }
+            Write-Output "===END==="
+          }
 
       - name: Echtes Löschen testen (virtuelle Festplatte mit eingehängtem NTFS-Laufwerk)
         shell: pwsh
@@ -185,10 +243,12 @@ jobs:
           Set-Content -Path W:\test.txt -Value 'Testdaten'
           $num = (Get-DiskImage -ImagePath $vhd | Get-Disk).Number
           Write-Host "Testdatenträger: $num"
-          $p = Start-Process -FilePath dist\win\WipeKit.exe -ArgumentList '--disk-test', $num, 'secure' -Wait -PassThru
           $log = Join-Path $env:TEMP 'WipeKit-DiskTest.log'
+          foreach ($mode in 'secure', 'quick', 'ssd', 'maximum', 'check') {
+            $p = Start-Process -FilePath dist\win\WipeKit.exe -ArgumentList '--disk-test', $num, $mode -Wait -PassThru
+            if ($p.ExitCode -ne 0) { if (Test-Path $log) { Get-Content $log }; throw "Test $mode fehlgeschlagen (Code $($p.ExitCode))" }
+          }
           if (Test-Path $log) { Get-Content $log }
-          if ($p.ExitCode -ne 0) { throw "Löschtest fehlgeschlagen (Code $($p.ExitCode))" }
 
       - name: Installer bauen
         shell: pwsh

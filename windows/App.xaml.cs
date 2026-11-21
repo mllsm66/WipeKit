@@ -29,6 +29,12 @@ namespace WipeKit
                 return;
             }
 
+            if (args.Length >= 1 && args[0] == "--health-test")
+            {
+                Shutdown(SelfTests.HealthTest());
+                return;
+            }
+
             if (args.Length >= 3 && args[0] == "--disk-test")
             {
                 Shutdown(SelfTests.DiskTest(int.Parse(args[1]), args[2]));

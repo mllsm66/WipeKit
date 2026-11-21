@@ -19,13 +19,16 @@ namespace WipeKit
         const string ListScript = @"
 $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$disks = @(Get-Disk | ForEach-Object { [pscustomobject]@{ Number = [int]$_.Number; Name = [string]$_.FriendlyName; Size = [int64]$_.Size; Bus = [string]$_.BusType; IsBoot = [bool]$_.IsBoot; IsSystem = [bool]$_.IsSystem } })
+$disks = @(Get-Disk | ForEach-Object { [pscustomobject]@{ Number = [int]$_.Number; Name = [string]$_.FriendlyName; Size = [int64]$_.Size; Bus = [string]$_.BusType; IsBoot = [bool]$_.IsBoot; IsSystem = [bool]$_.IsSystem; ReadOnly = [bool]$_.IsReadOnly; Serial = [string]$_.SerialNumber; PageFile = [bool]$_.IsPageFile } })
 $phys = @(Get-PhysicalDisk | ForEach-Object { [pscustomobject]@{ Id = [string]$_.DeviceId; Media = [string]$_.MediaType } })
 $vols = @(Get-Partition | Where-Object { [int]$_.DriveLetter -ne 0 } | ForEach-Object { $v = $_ | Get-Volume; [pscustomobject]@{ Disk = [int]$_.DiskNumber; Letter = [string]$_.DriveLetter; Label = [string]$v.FileSystemLabel } })
 [pscustomobject]@{ Disks = $disks; Physical = $phys; Volumes = $vols } | ConvertTo-Json -Depth 4 -Compress
 ";
 
-        public static List<DiskInfo> ListExternalDisks()
+        public static List<DiskInfo> ListExternalDisks() => ListDisks().Where(d => !d.IsInternal).ToList();
+
+        /// <summary>Alle Laufwerke – externe (USB, SD …) und interne.</summary>
+        public static List<DiskInfo> ListDisks()
         {
             var result = new List<DiskInfo>();
             string json = RunPowerShell(ListScript);
@@ -56,7 +59,8 @@ $vols = @(Get-Partition | Where-Object { [int]$_.DriveLetter -ne 0 } | ForEach-O
             {
                 string bus = Str(d, "Bus");
                 bool testDisk = AllowVirtualForTests && bus == "File Backed Virtual";
-                if (!ExternalBuses.Contains(bus, StringComparer.OrdinalIgnoreCase) && !testDisk) continue;
+                if ((bus == "File Backed Virtual" || bus == "Spaces" || bus == "Virtual") && !testDisk) continue;
+                bool external = ExternalBuses.Contains(bus, StringComparer.OrdinalIgnoreCase) || testDisk;
                 long size = Long(d, "Size");
                 if (size <= 0) continue;   // z. B. leerer Kartenleser
                 int number = Int(d, "Number");
@@ -70,10 +74,13 @@ $vols = @(Get-Partition | Where-Object { [int]$_.DriveLetter -ne 0 } | ForEach-O
                     Bus = bus.Equals("1394", StringComparison.Ordinal) ? "FireWire" : bus.ToUpperInvariant() == "MMC" ? "SD" : bus,
                     IsSsd = ssd,
                     Volumes = volumes.TryGetValue(number, out var vl) ? vl : new List<string>(),
-                    IsProtected = Bool(d, "IsBoot") || Bool(d, "IsSystem"),
+                    IsProtected = Bool(d, "IsBoot") || Bool(d, "IsSystem") || Bool(d, "PageFile"),
+                    IsInternal = !external,
+                    IsReadOnly = Bool(d, "ReadOnly"),
+                    Serial = Str(d, "Serial").Trim(),
                 });
             }
-            return result.OrderBy(x => x.Number).ToList();
+            return result.OrderBy(x => x.IsInternal).ThenBy(x => x.Number).ToList();
         }
 
         public static string RunPowerShell(string script, int timeoutMs = 120000)

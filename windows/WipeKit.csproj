@@ -9,11 +9,11 @@
     <RootNamespace>WipeKit</RootNamespace>
     <ApplicationIcon>..\assets\WipeKit.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Product>WipeKit</Product>
     <Company>mllsm66</Company>
     <Copyright>© 2026 mllsm66 – MIT-Lizenz</Copyright>
-    <Description>Externe Laufwerke sicher löschen</Description>
+    <Description>Laufwerke sicher löschen und ihre Gesundheit prüfen</Description>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <NoWarn>$(NoWarn);WPF0001;CA1416</NoWarn>
@@ -22,6 +22,11 @@
 
   <ItemGroup>
     <Resource Include="..\assets\WipeKit.ico" Link="WipeKit.ico" />
+    <EmbeddedResource Include="..\assets\report-logo.jpg" LogicalName="WipeKit.report-logo.jpg" />
+    <EmbeddedResource Include="..\THIRD-PARTY-NOTICES.md" LogicalName="WipeKit.THIRD-PARTY-NOTICES.md" />
+    <EmbeddedResource Include="..\licenses\GPL-2.0.txt" LogicalName="WipeKit.GPL-2.0.txt" />
+    <!-- smartctl.exe aus smartmontools 7.5 (GPL-2.0-or-later), wird im Build von GitHub nach vendor\ geladen -->
+    <EmbeddedResource Include="vendor\smartctl.exe" LogicalName="WipeKit.smartctl.exe" Condition="Exists('vendor\smartctl.exe')" />
   </ItemGroup>
 
 </Project>

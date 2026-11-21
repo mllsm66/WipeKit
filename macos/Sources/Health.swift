@@ -173,8 +173,8 @@ enum HealthParser {
             || text.contains("smart not supported") || text.contains("smart support is: ambiguous") {
             return "Das Laufwerk (bzw. die Verbindung) unterstützt keine Gesundheitsdaten (S.M.A.R.T.)."
         }
-        if text.contains("no such device") || text.contains("open device") {
-            return "Das Laufwerk konnte nicht geöffnet werden – ist es noch angeschlossen?"
+        if text.contains("no such device") || text.contains("open device") || text.contains("unable to detect device type") {
+            return "Das Laufwerk konnte nicht abgefragt werden (Adapter oder Treiber unterstützt es nicht)."
         }
         return "Für dieses Laufwerk sind keine Gesundheitsdaten (S.M.A.R.T.) verfügbar."
     }
