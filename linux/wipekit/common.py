@@ -2,13 +2,14 @@
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 
 APP_NAME = "WipeKit"
 APP_ID = "io.github.mllsm66.WipeKit"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # Löschmodi
@@ -24,71 +25,124 @@ class WipeMode:
     icon: str
     tagline: str
     passes: tuple
-    verifies: bool
+    verify: str              # "full" (jeder Sektor), "samples" (Stichproben) oder ""
     trims: bool
     explanation: str
     best_for: str
-    security_level: int
+    security_level: int      # 0 … 5
     security_note: str
     method_description: str
+    standard: str
+    purge: bool = False      # Firmware-Löschung durch das Laufwerk selbst
+    read_only: bool = False  # ändert keine Daten (»Nur prüfen«)
+
+    @property
+    def verifies(self) -> bool:
+        return self.verify == "full"
 
     @property
     def work_units(self) -> int:
-        return len(self.passes) + (1 if self.verifies else 0)
+        return len(self.passes) + (1 if self.verify == "full" or self.read_only else 0)
 
     @property
     def step_count(self) -> int:
-        return self.work_units + (1 if self.trims else 0)
+        if self.purge:
+            return 3
+        return max(1, len(self.passes) + (1 if self.verify or self.read_only else 0) + (1 if self.trims else 0))
 
     @property
     def security_label(self) -> str:
-        return "Sehr hoch" if self.security_level >= 4 else "Hoch"
+        return {0: "Keine Löschung", 3: "Hoch", 4: "Sehr hoch", 5: "Höchste Stufe"}.get(self.security_level, "Hoch")
 
 
+CLEAR = "NIST SP 800-88 Rev. 2 – »Clear« (Überschreiben)"
 MODES = [
     WipeMode(
-        "quick", "Schnell", "wipekit-quick-symbolic", "1 Durchgang · ohne Prüfung",
-        (RANDOM,), False, False,
+        "quick", "Schnell", "wipekit-quick-symbolic", "1 Durchgang · Stichproben-Prüfung",
+        (RANDOM,), "samples", False,
         "Überschreibt jeden Sektor des Laufwerks einmal mit kryptografisch erzeugten Zufallsdaten. "
-        "Die bisherigen Daten lassen sich danach weder mit Software noch mit Labormethoden wiederherstellen.",
+        "Anschließend werden Anfang, Ende und rund 2.000 zufällig verteilte Stellen gelesen und mit den "
+        "geschriebenen Daten verglichen.",
         "Festplatten (HDD), wenn es schnell gehen soll", 3,
-        "Entspricht für Festplatten dem Standard NIST SP 800-88 »Clear«. Ob wirklich jeder Sektor "
-        "beschrieben wurde, wird nicht kontrolliert.",
-        "1 Durchgang Zufallsdaten",
+        "Entspricht für Festplatten dem Standard »Clear«. Die Stichproben erkennen typische Fehler wie "
+        "einen defekten USB-Adapter – eine Lücke an einer einzelnen Stelle kann aber nur die vollständige "
+        "Prüfung der Modi »Sicher« und »Maximal« ausschließen.",
+        "1 Durchgang Zufallsdaten + Stichproben-Prüfung (Anfang, Ende, ca. 2.000 Stellen)", CLEAR,
     ),
     WipeMode(
-        "secure", "Sicher", "wipekit-shield-symbolic", "2 Durchgänge · mit Prüfung",
-        (RANDOM, ZEROS), True, False,
+        "secure", "Sicher", "wipekit-shield-symbolic", "2 Durchgänge · vollständige Prüfung",
+        (RANDOM, ZEROS), "full", False,
         "Überschreibt das Laufwerk zuerst mit Zufallsdaten und anschließend mit Nullen. Danach wird "
         "jeder Sektor gelesen und geprüft, ob er tatsächlich überschrieben wurde.",
         "Festplatten mit sensiblen Daten – die empfohlene Standardwahl", 4,
         "Die Prüfung stellt sicher, dass kein Bereich ausgelassen wurde, und erkennt defekte Sektoren "
         "sowie unzuverlässige USB-Adapter.",
-        "2 Durchgänge (Zufallsdaten, Nullen) + vollständige Lese-Verifikation",
+        "2 Durchgänge (Zufallsdaten, Nullen) + vollständige Lese-Verifikation", CLEAR,
     ),
     WipeMode(
-        "maximum", "Maximal", "wipekit-lock-symbolic", "3 Durchgänge · mit Prüfung",
-        (RANDOM, RANDOM, ZEROS), True, False,
+        "maximum", "Maximal", "wipekit-lock-symbolic", "3 Durchgänge · vollständige Prüfung",
+        (RANDOM, RANDOM, ZEROS), "full", False,
         "Überschreibt das Laufwerk zweimal mit Zufallsdaten und einmal mit Nullen. Danach wird jeder "
         "Sektor gelesen und geprüft.",
         "Aufträge, die mehrfaches Überschreiben ausdrücklich verlangen", 4,
         "Bei modernen Festplatten nicht messbar sicherer als »Sicher«, erfüllt aber Vorgaben mit "
         "mehreren Durchgängen (angelehnt an DoD 5220.22-M).",
         "3 Durchgänge (Zufallsdaten, Zufallsdaten, Nullen) + vollständige Lese-Verifikation",
+        CLEAR + ", mehrfach (angelehnt an DoD 5220.22-M)",
     ),
     WipeMode(
         "ssd", "SSD", "wipekit-ssd-symbolic", "2 Durchgänge · Prüfung · TRIM",
-        (RANDOM, SEEDED), True, True,
+        (RANDOM, SEEDED), "full", True,
         "Füllt die SSD zweimal vollständig mit Zufallsdaten und prüft den zweiten Durchgang Sektor für "
         "Sektor. Zum Schluss werden alle Speicherblöcke per TRIM an den SSD-Controller freigegeben, "
         "damit er sie intern löscht.",
-        "SSDs, USB-Sticks und Speicherkarten", 3,
+        "SSDs, USB-Sticks und Speicherkarten (auch über USB)", 3,
         "Zweifaches Vollschreiben erreicht bei den meisten SSDs auch die versteckten Reservebereiche. "
-        "Eine vollständige Garantie bietet nur das Firmware-Kommando »Secure Erase« des Herstellers.",
+        "Eine Garantie für diese Bereiche gibt nur die »Firmware-Löschung«.",
         "2 Durchgänge Zufallsdaten + vollständige Lese-Verifikation + TRIM aller Blöcke",
+        CLEAR + " – für SSDs nach bestem Bemühen",
+    ),
+    WipeMode(
+        "purge", "Firmware-Löschung", "wipekit-chip-symbolic", "Löschbefehl des Laufwerks · Stichproben",
+        (), "samples", False,
+        "Lässt das Laufwerk sich selbst löschen: WipeKit sendet den eingebauten Löschbefehl "
+        "(NVMe/ATA »Sanitize« oder »Secure Erase«). Dabei werden auch Reserve- und Verwaltungsbereiche "
+        "gelöscht, die kein Programm von außen erreicht. Vorher werden Prüfmarken geschrieben, "
+        "anschließend wird kontrolliert, dass sie verschwunden sind.",
+        "Interne SATA- und NVMe-SSDs – die gründlichste Methode für SSDs", 5,
+        "Entspricht »Purge« nach NIST SP 800-88 / IEEE 2883. Funktioniert nur bei direkt angeschlossenen "
+        "Laufwerken (SATA/NVMe) – USB-Adapter leiten die Befehle meist nicht zuverlässig weiter.",
+        "Firmware-Löschbefehl des Laufwerks + Kontrolle von Prüfmarken",
+        "NIST SP 800-88 Rev. 2 / IEEE 2883 – »Purge« (Firmware-Löschung)", purge=True,
+    ),
+    WipeMode(
+        "check", "Nur prüfen", "wipekit-check-symbolic", "Liest alles · ändert nichts",
+        (), "", False,
+        "Liest das gesamte Laufwerk und prüft, ob es leer ist (nur Nullen). Es werden keine Daten "
+        "verändert. So lässt sich zum Beispiel eine Löschung mit einem anderen Programm kontrollieren. "
+        "Nebenbei werden unlesbare Stellen gezählt und die Lesegeschwindigkeit aufgezeichnet.",
+        "Kontrolle eines bereits gelöschten oder neuen Laufwerks", 0,
+        "Nach »Sicher« und »Maximal« ist ein Laufwerk leer (nur Nullen). Nach »Schnell« und »SSD« "
+        "enthält es Zufallsdaten und gilt deshalb hier als »nicht leer« – das ist dann kein Fehler.",
+        "Vollständiges Lesen aller Sektoren, keine Schreibzugriffe", "Keine Löschung – nur Kontrolle",
+        read_only=True,
     ),
 ]
 MODES_BY_KEY = {m.key: m for m in MODES}
+
+# S.M.A.R.T.-Selbsttests laufen als Vorgang wie ein Löschvorgang, ändern aber keine Daten
+SELFTEST_MODES = [
+    WipeMode("selftest-short", "Kurztest", "wipekit-pulse-symbolic", "S.M.A.R.T.-Selbsttest, ca. 2 Minuten",
+             (), "", False, "Das Laufwerk prüft seine Elektronik und einen kleinen Teil der Oberfläche selbst.",
+             "Schneller Gesundheitscheck", 0, "", "S.M.A.R.T.-Kurztest", "", read_only=True),
+    WipeMode("selftest-long", "Langtest", "wipekit-pulse-symbolic", "S.M.A.R.T.-Selbsttest der gesamten Oberfläche",
+             (), "", False, "Das Laufwerk liest seine gesamte Oberfläche selbst und meldet fehlerhafte Stellen.",
+             "Gründlicher Gesundheitscheck", 0, "", "S.M.A.R.T.-Langtest", "", read_only=True),
+    WipeMode("selftest-conveyance", "Transporttest", "wipekit-pulse-symbolic", "S.M.A.R.T.-Selbsttest nach Transport",
+             (), "", False, "Erkennt Schäden, die beim Transport entstanden sein können.",
+             "Nach Versand oder Sturz", 0, "", "S.M.A.R.T.-Transporttest", "", read_only=True),
+]
+MODES_BY_KEY.update({m.key: m for m in SELFTEST_MODES})
 
 
 def pattern_label(p: str) -> str:
@@ -120,6 +174,13 @@ class HelperStatus:
     verified: bool = None
     trimResult: str = None
     sleepPrevented: bool = False
+    sampleResult: str = None        # Ergebnis der Stichproben-Prüfung
+    hiddenArea: str = None          # HPA-Prüfung
+    purgeMethod: str = None         # verwendeter Firmware-Befehl
+    nonZeroBytes: int = None        # »Nur prüfen«: Bytes, die nicht 0 sind
+    badBlocks: int = 0              # unlesbare 64-KiB-Bereiche
+    curve: list = None              # Lesegeschwindigkeit je 0,5 % (MB/s)
+    indeterminate: bool = False     # Fortschritt unbekannt (Firmware arbeitet)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -154,6 +215,10 @@ class Disk:
     mountpoints: list = field(default_factory=list)
     holders: list = field(default_factory=list)   # aktive crypt/lvm-Geräte darunter
     is_protected: bool = False
+    internal: bool = False
+    transport: str = ""     # lsblk TRAN, z. B. usb, sata, nvme
+    serial: str = ""
+    read_only: bool = False
 
     @property
     def type_label(self) -> str:
@@ -167,7 +232,14 @@ class Disk:
     def icon(self) -> str:
         if self.bus in ("SD", "MMC"):
             return "wipekit-sd-symbolic"
+        if self.transport == "usb" and self.is_ssd is True and self.size < 300e9:
+            return "wipekit-usb-symbolic"
         return "wipekit-drive-symbolic"
+
+    @property
+    def direct_attached(self) -> bool:
+        """SATA/NVMe direkt am Mainboard – Voraussetzung für die Firmware-Löschung."""
+        return self.transport in ("sata", "ata", "nvme", "sas") or self.name.startswith("nvme")
 
 
 def _bool(v) -> bool:
@@ -182,15 +254,12 @@ def _walk(node):
         yield from _walk(child)
 
 
-def list_external_disks(include_loop: bool = False) -> list:
-    """Entspricht ungefähr `diskutil list external physical` auf dem Mac.
-
-    include_loop ist nur für automatische Tests gedacht (Loop-Geräte = Dateien, keine echten Laufwerke).
-    """
+def list_disks(include_loop: bool = False) -> list:
+    """Alle Laufwerke – externe (USB, SD …) und interne. include_loop nur für automatische Tests."""
     try:
         out = subprocess.run(
             ["lsblk", "-J", "-b", "-o",
-             "NAME,PATH,SIZE,TYPE,TRAN,ROTA,MODEL,VENDOR,RM,HOTPLUG,MOUNTPOINT,LABEL"],
+             "NAME,PATH,SIZE,TYPE,TRAN,ROTA,MODEL,VENDOR,SERIAL,RM,RO,HOTPLUG,MOUNTPOINT,LABEL"],
             capture_output=True, text=True, timeout=15, check=True,
         ).stdout
         devices = json.loads(out).get("blockdevices", [])
@@ -199,13 +268,15 @@ def list_external_disks(include_loop: bool = False) -> list:
 
     disks = []
     for d in devices:
+        name = d.get("name", "")
         is_test_loop = include_loop and d.get("type") == "loop"
         if d.get("type") != "disk" and not is_test_loop:
             continue
+        if name.startswith(("zram", "ram")) or re.search(r"(boot\d+|rpmb)$", name):
+            continue
         tran = (d.get("tran") or "").lower()
         hotplug = _bool(d.get("hotplug")) or _bool(d.get("rm"))
-        if tran not in EXTERNAL_TRANSPORTS and not hotplug and not is_test_loop:
-            continue
+        internal = not is_test_loop and tran not in EXTERNAL_TRANSPORTS and not hotplug
         try:
             size = int(d.get("size") or 0)
         except ValueError:
@@ -242,16 +313,23 @@ def list_external_disks(include_loop: bool = False) -> list:
             protected = True
 
         model = " ".join(x for x in [(d.get("vendor") or "").strip(), (d.get("model") or "").strip()] if x)
-        bus = {"usb": "USB", "ieee1394": "FireWire", "mmc": "SD", "sdio": "SD"}.get(tran, tran.upper() or "?")
+        bus = {"usb": "USB", "ieee1394": "FireWire", "mmc": "SD", "sdio": "SD", "sata": "SATA", "ata": "ATA",
+               "nvme": "NVMe", "sas": "SAS", "virtio": "Virtuell"}.get(tran, tran.upper() or "?")
         if is_test_loop:
             bus = "Test"
         disks.append(Disk(
-            name=d.get("name", ""), path=d.get("path") or "/dev/" + d.get("name", ""),
+            name=name, path=d.get("path") or "/dev/" + name,
             model=model or "Unbekanntes Laufwerk", size=size, bus=bus, is_ssd=is_ssd,
             volumes=volumes, mountpoints=mounts, holders=holders, is_protected=protected,
+            internal=internal, transport=tran, serial=(d.get("serial") or "").strip(),
+            read_only=_bool(d.get("ro")),
         ))
-    disks.sort(key=lambda x: x.name)
+    disks.sort(key=lambda x: (x.internal, x.name))
     return disks
+
+
+def list_external_disks(include_loop: bool = False) -> list:
+    return [d for d in list_disks(include_loop) if not d.internal]
 
 
 def recommended_mode(disk: Disk) -> str:

@@ -1,0 +1,227 @@
+{
+ "json_format_version": [
+  1,
+  0
+ ],
+ "smartctl": {
+  "version": [
+   7,
+   5
+  ],
+  "exit_status": 4
+ },
+ "device": {
+  "name": "/dev/sdc",
+  "info_name": "/dev/sdc [SAT]",
+  "type": "sat",
+  "protocol": "ATA"
+ },
+ "model_family": "Crucial/Micron Client SSDs",
+ "model_name": "CT500MX500SSD1",
+ "serial_number": "2034E4A1B2C3",
+ "firmware_version": "M3CR043",
+ "user_capacity": {
+  "blocks": 976773168,
+  "bytes": 500107862016
+ },
+ "logical_block_size": 512,
+ "rotation_rate": 0,
+ "form_factor": {
+  "ata_value": 3,
+  "name": "2.5 inches"
+ },
+ "trim": {
+  "supported": true,
+  "deterministic": true,
+  "zeroed": false
+ },
+ "sata_version": {
+  "string": "SATA 3.3",
+  "value": 511
+ },
+ "interface_speed": {
+  "max": {
+   "string": "6.0 Gb/s",
+   "units_per_second": 60,
+   "bits_per_unit": 100000000
+  },
+  "current": {
+   "string": "6.0 Gb/s",
+   "units_per_second": 60,
+   "bits_per_unit": 100000000
+  }
+ },
+ "smart_status": {
+  "passed": true
+ },
+ "ata_security": {
+  "state": 1,
+  "string": "Disabled, NOT FROZEN [SEC1]",
+  "enabled": false,
+  "frozen": false
+ },
+ "ata_smart_attributes": {
+  "table": [
+   {
+    "id": 1,
+    "name": "Raw_Read_Error_Rate",
+    "value": 100,
+    "worst": 100,
+    "thresh": 0,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 0,
+     "string": "0"
+    }
+   },
+   {
+    "id": 5,
+    "name": "Reallocate_NAND_Blk_Cnt",
+    "value": 100,
+    "worst": 100,
+    "thresh": 10,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 0,
+     "string": "0"
+    }
+   },
+   {
+    "id": 9,
+    "name": "Power_On_Hours",
+    "value": 100,
+    "worst": 100,
+    "thresh": 0,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 9876,
+     "string": "9876"
+    }
+   },
+   {
+    "id": 12,
+    "name": "Power_Cycle_Count",
+    "value": 100,
+    "worst": 100,
+    "thresh": 0,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 2345,
+     "string": "2345"
+    }
+   },
+   {
+    "id": 173,
+    "name": "Ave_Block-Erase_Count",
+    "value": 77,
+    "worst": 77,
+    "thresh": 0,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 346,
+     "string": "346"
+    }
+   },
+   {
+    "id": 194,
+    "name": "Temperature_Celsius",
+    "value": 67,
+    "worst": 48,
+    "thresh": 0,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 33,
+     "string": "33"
+    }
+   },
+   {
+    "id": 197,
+    "name": "Current_Pending_ECC_Cnt",
+    "value": 100,
+    "worst": 100,
+    "thresh": 0,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 2,
+     "string": "2"
+    }
+   },
+   {
+    "id": 198,
+    "name": "Offline_Uncorrectable",
+    "value": 100,
+    "worst": 100,
+    "thresh": 0,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 0,
+     "string": "0"
+    }
+   },
+   {
+    "id": 202,
+    "name": "Percent_Lifetime_Remain",
+    "value": 77,
+    "worst": 77,
+    "thresh": 1,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 23,
+     "string": "23"
+    }
+   },
+   {
+    "id": 246,
+    "name": "Total_LBAs_Written",
+    "value": 100,
+    "worst": 100,
+    "thresh": 0,
+    "when_failed": "",
+    "flags": {
+     "prefailure": false
+    },
+    "raw": {
+     "value": 40987654321,
+     "string": "40987654321"
+    }
+   }
+  ]
+ },
+ "endurance_used": {
+  "current_percent": 23
+ },
+ "power_on_time": {
+  "hours": 9876
+ },
+ "power_cycle_count": 2345,
+ "temperature": {
+  "current": 33
+ }
+}

@@ -1,0 +1,25 @@
+{
+ "json_format_version": [
+  1,
+  0
+ ],
+ "smartctl": {
+  "version": [
+   7,
+   5
+  ],
+  "exit_status": 2,
+  "messages": [
+   {
+    "string": "/dev/sdd: Unknown USB bridge [0x152d:0x0578 (0x214)]",
+    "severity": "error"
+   }
+  ]
+ },
+ "device": {
+  "name": "/dev/sdd",
+  "info_name": "/dev/sdd",
+  "type": "scsi",
+  "protocol": "SCSI"
+ }
+}

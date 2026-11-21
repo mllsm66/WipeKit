@@ -1,0 +1,41 @@
+#!/usr/bin/python3
+"""WipeKit – Diagnose (läuft als root, gestartet über pkexec).
+
+Liest die S.M.A.R.T.-Daten aller Laufwerke und gibt sie als JSON auf stdout aus.
+Verändert nichts an den Laufwerken.
+"""
+
+import json
+import os
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from common import list_disks  # noqa: E402
+import smartread  # noqa: E402
+
+
+def read_one(d):
+    res = smartread.read_smart(d.path, d.transport)
+    out = {"smart": res.get("json") or {}, "devtype": res.get("devtype", ""), "missing": res.get("missing", False)}
+    if not d.name.startswith("nvme") and d.bus not in ("SD",):
+        out["hpa"] = smartread.read_hpa(d.path)
+    return d.name, out
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print(json.dumps({"error": "Keine Administratorrechte."}))
+        return 1
+    only = sys.argv[1] if len(sys.argv) > 1 else None
+    if only is not None and (not only.isalnum() or len(only) > 32):
+        return 2
+    disks = [d for d in list_disks() if only is None or d.name == only]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        results = dict(ex.map(read_one, disks))
+    print(json.dumps({"version": 1, "disks": results}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

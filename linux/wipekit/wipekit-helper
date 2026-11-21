@@ -1,30 +1,45 @@
 #!/usr/bin/python3
-"""WipeKit – Lösch-Prozess (läuft als root, gestartet über pkexec).
+"""WipeKit – Arbeitsprozess (läuft als root, gestartet über pkexec).
 
-Schreibt den Fortschritt nach <job-dir>/status.json und bricht ab,
-sobald <job-dir>/cancel existiert.
+Löschen, Prüfen, Firmware-Löschung und S.M.A.R.T.-Selbsttests.
+Schreibt den Fortschritt nach <job-dir>/status.json und bricht ab, sobald <job-dir>/cancel existiert.
 """
 
 import argparse
 import errno
 import fcntl
+import hashlib
+import json
 import mmap
 import os
 import random
+import re
+import shutil
 import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from common import (  # noqa: E402
-    MODES_BY_KEY, RANDOM, SEEDED, ZEROS, HelperStatus, fmt_bytes, list_external_disks, pattern_label,
+    MODES_BY_KEY, RANDOM, SEEDED, ZEROS, HelperStatus, fmt_bytes, list_disks, pattern_label,
 )
+import smartread  # noqa: E402
 
-CHUNK = 4 * 1024 * 1024          # 4 MiB pro Schreibvorgang
+CHUNK = 4 * 1024 * 1024          # 4 MiB pro Schreib-/Lesevorgang
+SUB = 64 * 1024                  # Auflösung bei Lesefehlern
+MIB = 1024 * 1024
 BLKDISCARD = 0x1277              # _IO(0x12, 119)
+BLKRRPART = 0x125F               # _IO(0x12, 95)
 TRIM_STEP = 1 << 30              # 1 GiB pro TRIM-Aufruf
+SAMPLES = 2048                   # Stichproben (je 1 MiB) bei »Schnell«
+EDGE = 16 * MIB                  # Anfang und Ende werden immer geprüft
+MARKERS = 64                     # Prüfmarken bei der Firmware-Löschung
+CURVE = 200                      # Messpunkte der Geschwindigkeitskurve
+MAX_BAD = 4096
+SELFTESTS = {"selftest-short": "short", "selftest-long": "long", "selftest-conveyance": "conveyance"}
 
 
 class Cancelled(Exception):
@@ -35,21 +50,37 @@ class Failed(Exception):
     pass
 
 
+def run(args, timeout=None):
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout + r.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "Zeitüberschreitung"
+    except OSError as e:
+        return -1, str(e)
+
+
 class Engine:
-    def __init__(self, disk: str, mode_key: str, job_dir: str, expected_size: int, allow_loop: bool = False):
+    def __init__(self, disk: str, mode_key: str, job_dir: str, expected_size: int,
+                 allow_loop: bool = False, internal_ok: bool = False):
         self.allow_loop = allow_loop
-        self.disk = disk
+        self.internal_ok = internal_ok
+        self.disk_name = disk
+        self.disk = None
+        self.mode_key = mode_key
         self.mode = MODES_BY_KEY.get(mode_key)
         self.job_dir = job_dir
         self.expected_size = expected_size
         self.status_path = os.path.join(job_dir, "status.json")
         self.cancel_path = os.path.join(job_dir, "cancel")
         self.status = HelperStatus(pid=os.getpid(), startedAt=time.time(),
-                                   stepCount=self.mode.step_count if self.mode else 0)
+                                   stepCount=self.mode.step_count if self.mode else 1)
         self.last_write = 0.0
         self.samples = []
         self.inhibitor = None
         self.seed = int.from_bytes(os.urandom(8), "little")
+        self.devtype = ""
+        self.sample_hashes = {}
 
     # -- Status ---------------------------------------------------------------
 
@@ -66,10 +97,20 @@ class Engine:
         except OSError:
             pass
 
-    def report(self, total: int):
+    def write_file(self, name: str, data: str):
+        path = os.path.join(self.job_dir, name)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+            with os.fdopen(fd, "w") as f:
+                f.write(data)
+            os.chmod(path, 0o644)
+        except OSError:
+            pass
+
+    def report(self, total: int, force=False):
         self.status.bytesDoneTotal = total
         now = time.time()
-        if now - self.last_write < 1:
+        if now - self.last_write < 1 and not force:
             return
         self.samples.append((now, total))
         self.samples = [s for s in self.samples if now - s[0] <= 60]   # gleitendes 60-s-Fenster
@@ -90,6 +131,7 @@ class Engine:
         self.status.message = message
         self.status.finishedAt = time.time()
         self.status.sleepPrevented = False
+        self.status.indeterminate = False
         if state == "done":
             self.status.bytesDoneTotal = self.status.bytesTotal
         self.write_status()
@@ -102,7 +144,7 @@ class Engine:
         try:
             self.inhibitor = subprocess.Popen(
                 ["systemd-inhibit", "--what=sleep:idle", "--who=WipeKit",
-                 f"--why=Löschvorgang auf /dev/{self.disk}", "--mode=block", "sleep", "infinity"],
+                 f"--why=Vorgang auf /dev/{self.disk_name}", "--mode=block", "sleep", "infinity"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             time.sleep(0.3)
@@ -120,6 +162,25 @@ class Engine:
                 self.inhibitor.kill()
         self.inhibitor = None
 
+    # -- Gesundheitsdaten ---------------------------------------------------------
+
+    def save_smart(self, name: str):
+        if self.disk is None or self.disk.bus == "Test":
+            return None
+        try:
+            res = smartread.read_smart(self.disk.path, self.disk.transport)
+            self.devtype = res.get("devtype", "")
+            self.write_file(name, json.dumps(res.get("json") or {}))
+            return res.get("json")
+        except Exception:
+            return None
+
+    def check_hidden_area(self):
+        if self.disk is None or self.disk.name.startswith("nvme") or self.disk.bus in ("Test", "SD"):
+            return
+        hpa = smartread.read_hpa(self.disk.path)
+        self.status.hiddenArea = smartread.hpa_text(hpa) or None
+
     # -- Ablauf -----------------------------------------------------------------
 
     def run(self) -> int:
@@ -128,32 +189,57 @@ class Engine:
         try:
             return self._run()
         except Cancelled:
+            if self.mode and self.mode.read_only:
+                return self.finish("cancelled", "Vom Benutzer abgebrochen.")
+            if self.mode_key in SELFTESTS:
+                smartread.self_test(self.disk.path, self.devtype, "abort")
+                return self.finish("cancelled", "Selbsttest abgebrochen.")
             return self.finish("cancelled", "Vom Benutzer abgebrochen. Das Laufwerk ist nur teilweise überschrieben.")
         except Failed as e:
             return self.finish("failed", str(e))
         except Exception as e:  # unerwartet
             return self.finish("failed", f"Unerwarteter Fehler: {e}")
+        finally:
+            if self.disk is not None and self.mode_key not in SELFTESTS:
+                self.save_smart("smart-after.json")
 
     def _run(self) -> int:
         if os.geteuid() != 0:
             raise Failed("Keine Administratorrechte.")
-        if not self.mode:
-            raise Failed("Unbekannter Löschmodus.")
-        if not self.disk or "/" in self.disk or not self.disk.isalnum():
-            raise Failed(f"Ungültige Laufwerkskennung »{self.disk}«.")
+        if not self.mode and self.mode_key not in SELFTESTS:
+            raise Failed("Unbekannter Modus.")
+        if not self.disk_name or "/" in self.disk_name or not self.disk_name.isalnum():
+            raise Failed(f"Ungültige Laufwerkskennung »{self.disk_name}«.")
 
         # --- Sicherheitsprüfungen ------------------------------------------------
-        disks = {d.name: d for d in list_external_disks(include_loop=self.allow_loop)}
-        disk = disks.get(self.disk)
+        disks = {d.name: d for d in list_disks(include_loop=self.allow_loop)}
+        disk = disks.get(self.disk_name)
         if not disk:
-            raise Failed(f"/dev/{self.disk} ist kein angeschlossenes externes Laufwerk (mehr).")
-        if disk.is_protected:
-            raise Failed(f"/dev/{self.disk} enthält das laufende System und wird niemals gelöscht.")
-        if disk.holders:
-            raise Failed("Auf dem Laufwerk sind verschlüsselte oder LVM-Bereiche aktiv ("
-                         + ", ".join(disk.holders) + "). Bitte zuerst sperren bzw. deaktivieren.")
+            raise Failed(f"/dev/{self.disk_name} ist nicht (mehr) angeschlossen.")
+        self.disk = disk
+        writes = self.mode_key not in SELFTESTS and not self.mode.read_only
+        if writes:
+            if disk.is_protected:
+                raise Failed(f"/dev/{self.disk_name} enthält das laufende System und wird niemals gelöscht.")
+            if disk.internal and not self.internal_ok:
+                raise Failed(f"/dev/{self.disk_name} ist ein internes Laufwerk – Löschen wurde nicht bestätigt.")
+            if disk.read_only:
+                raise Failed(f"/dev/{self.disk_name} ist schreibgeschützt.")
+            if disk.holders:
+                raise Failed("Auf dem Laufwerk sind verschlüsselte oder LVM-Bereiche aktiv ("
+                             + ", ".join(disk.holders) + "). Bitte zuerst sperren bzw. deaktivieren.")
 
         self.start_inhibit()
+        self.status.phase = "Gesundheitsdaten werden gelesen …"
+        self.write_status()
+        self.save_smart("smart-before.json")
+
+        if self.mode_key in SELFTESTS:
+            return self.run_selftest(SELFTESTS[self.mode_key])
+        if self.mode.read_only:
+            return self.run_check()
+
+        self.check_hidden_area()
 
         # --- Aushängen -----------------------------------------------------------
         self.status.phase = "Laufwerk wird ausgehängt …"
@@ -163,33 +249,47 @@ class Engine:
             if r.returncode != 0:
                 raise Failed(f"»{mp}« konnte nicht ausgehängt werden: {r.stderr.strip() or 'wird benutzt'}")
 
-        # --- Öffnen --------------------------------------------------------------
-        path = f"/dev/{self.disk}"
+        if self.mode.purge:
+            return self.run_purge()
+        return self.run_wipe()
+
+    # -- Öffnen ------------------------------------------------------------------
+
+    def open_disk(self, write=True):
+        path = f"/dev/{self.disk_name}"
+        flags = (os.O_RDWR | os.O_EXCL) if write else os.O_RDONLY
         try:
-            fd = os.open(path, os.O_RDWR | os.O_DIRECT | os.O_EXCL)
+            fd = os.open(path, flags | os.O_DIRECT)
         except OSError as e:
             msg = f"{path} konnte nicht geöffnet werden: {e.strerror}."
             if e.errno == errno.EBUSY:
                 msg += " Das Laufwerk wird noch benutzt – bitte in anderen Programmen auswerfen."
             raise Failed(msg)
+        size = os.lseek(fd, 0, os.SEEK_END)
+        if size <= 0:
+            size = self.expected_size
+        if size <= 0:
+            os.close(fd)
+            raise Failed("Die Größe des Laufwerks konnte nicht ermittelt werden.")
+        if self.expected_size and abs(size - self.expected_size) > MIB:
+            os.close(fd)
+            raise Failed(f"Die Größe von {path} hat sich geändert ({fmt_bytes(size)} statt "
+                         f"{fmt_bytes(self.expected_size)}). Wurde das Laufwerk getauscht? Abbruch.")
+        return fd, size
 
+    # -- Überschreiben -------------------------------------------------------------
+
+    def run_wipe(self) -> int:
+        fd, size = self.open_disk()
         try:
-            size = os.lseek(fd, 0, os.SEEK_END)
-            if size <= 0:
-                size = self.expected_size
-            if size <= 0:
-                raise Failed("Die Größe des Laufwerks konnte nicht ermittelt werden.")
-            if self.expected_size and abs(size - self.expected_size) > 1024 * 1024:
-                raise Failed(f"Die Größe von {path} hat sich geändert ({fmt_bytes(size)} statt "
-                             f"{fmt_bytes(self.expected_size)}). Wurde das Laufwerk getauscht? Abbruch.")
-
             wbuf = mmap.mmap(-1, CHUNK)   # seitenausgerichtet – nötig für O_DIRECT
             rbuf = mmap.mmap(-1, CHUNK)
-
             m = self.mode
+            sample_list = self.pick_samples(size, SAMPLES) if m.verify == "samples" else []
+            sample_bytes = len(sample_list) * MIB
             self.status.diskSize = size
             self.status.stepCount = m.step_count
-            self.status.bytesTotal = size * m.work_units
+            self.status.bytesTotal = size * m.work_units + sample_bytes
             self.status.state = "running"
             self.status.startedAt = time.time()
             base = 0
@@ -199,10 +299,11 @@ class Engine:
                 label = pattern_label(pattern)
                 self.status.phase = f"Durchgang {i + 1}: {label}" if len(m.passes) > 1 else label
                 self.write_status()
-                self.write_pass(fd, wbuf, size, pattern, base)
+                last = i == len(m.passes) - 1
+                self.write_pass(fd, wbuf, size, pattern, base, sample_list if last else [])
                 base += size
 
-            if m.verifies:
+            if m.verify == "full":
                 self.status.step = len(m.passes) + 1
                 self.status.phase = "Prüfen (gesamte Platte lesen)"
                 self.write_status()
@@ -212,6 +313,16 @@ class Engine:
                 except Failed:
                     self.status.verified = False
                     raise
+            elif m.verify == "samples":
+                self.status.step = len(m.passes) + 1
+                self.status.phase = "Stichproben prüfen"
+                self.write_status()
+                ok, text = self.verify_samples(fd, rbuf, sample_list, base, expect_equal=True)
+                self.status.sampleResult = text
+                self.status.verified = ok
+                if not ok:
+                    raise Failed("Stichproben-Prüfung FEHLGESCHLAGEN: " + text +
+                                 " Das Laufwerk (oder der Adapter) arbeitet nicht zuverlässig.")
 
             if m.trims:
                 self.status.step = m.step_count
@@ -221,18 +332,34 @@ class Engine:
         finally:
             os.close(fd)
 
-        return self.finish("done", "Alle Sektoren wurden überschrieben und die Prüfung war erfolgreich."
-                           if self.mode.verifies else "Alle Sektoren wurden mit Zufallsdaten überschrieben.")
+        if self.mode.verify == "full":
+            msg = "Alle Sektoren wurden überschrieben und die Prüfung war erfolgreich."
+        else:
+            msg = "Alle Sektoren wurden mit Zufallsdaten überschrieben; die Stichproben-Prüfung war erfolgreich."
+        return self.finish("done", msg)
 
-    # -- Durchgänge ---------------------------------------------------------------
+    @staticmethod
+    def pick_samples(size: int, count: int) -> list:
+        """1-MiB-Stichproben: Anfang und Ende (je 16 MiB) plus zufällig verteilte Stellen."""
+        last = (size - MIB) // MIB
+        if last < 0:
+            return []
+        picks = set(range(0, min(EDGE // MIB, last + 1)))
+        picks |= set(range(max(0, last - EDGE // MIB + 1), last + 1))
+        rnd = random.SystemRandom()
+        want = min(last + 1, len(picks) + count)
+        while len(picks) < want:
+            picks.add(rnd.randint(0, last))
+        return sorted(p * MIB for p in picks)
 
     def seeded_bytes(self, n: int, offset: int) -> bytes:
         return random.Random(self.seed ^ (offset * 0x9E3779B97F4A7C15 & 0xFFFFFFFFFFFFFFFF)).randbytes(n)
 
-    def write_pass(self, fd, buf, size, pattern, base):
+    def write_pass(self, fd, buf, size, pattern, base, sample_list):
         if pattern == ZEROS:
             buf[:] = bytes(CHUNK)
         view = memoryview(buf)
+        samples = set(sample_list)
         offset = 0
         while offset < size:
             self.check_cancel()
@@ -241,21 +368,39 @@ class Engine:
                 buf[:n] = os.urandom(n)
             elif pattern == SEEDED:
                 buf[:n] = self.seeded_bytes(n, offset)
-            done = 0
-            while done < n:
-                try:
-                    w = os.pwrite(fd, view[done:n], offset + done)
-                except InterruptedError:
-                    continue
-                except OSError as e:
-                    raise Failed(f"Schreibfehler bei {fmt_bytes(offset + done)} von {fmt_bytes(size)}: "
-                                 f"{e.strerror}. Laufwerk getrennt oder defekt?")
-                if w == 0:
-                    raise Failed(f"Das Laufwerk nimmt bei {fmt_bytes(offset)} keine Daten mehr an.")
-                done += w
+            if samples:
+                for s in range(offset, offset + n, MIB):
+                    if s in samples and s + MIB <= offset + n:
+                        self.sample_hashes[s] = hashlib.sha256(view[s - offset:s - offset + MIB]).digest()
+            self.pwrite_all(fd, view, n, offset, size)
             offset += n
             self.report(base + offset)
         os.fsync(fd)   # Schreib-Cache der Platte leeren
+
+    def pwrite_all(self, fd, view, n, offset, size):
+        done = 0
+        while done < n:
+            try:
+                w = os.pwrite(fd, view[done:n], offset + done)
+            except InterruptedError:
+                continue
+            except OSError as e:
+                raise Failed(f"Schreibfehler bei {fmt_bytes(offset + done)} von {fmt_bytes(size)}: "
+                             f"{e.strerror}. Laufwerk getrennt oder defekt?")
+            if w == 0:
+                raise Failed(f"Das Laufwerk nimmt bei {fmt_bytes(offset)} keine Daten mehr an.")
+            done += w
+
+    def pread_all(self, fd, view, n, offset):
+        done = 0
+        while done < n:
+            try:
+                r = os.preadv(fd, [view[done:n]], offset + done)
+            except InterruptedError:
+                continue
+            if r == 0:
+                raise OSError(errno.EIO, "Keine Daten")
+            done += r
 
     def verify_pass(self, fd, buf, size, pattern, base):
         view = memoryview(buf)
@@ -264,23 +409,41 @@ class Engine:
         while offset < size:
             self.check_cancel()
             n = min(CHUNK, size - offset)
-            done = 0
-            while done < n:
-                try:
-                    r = os.preadv(fd, [view[done:n]], offset + done)
-                except InterruptedError:
-                    continue
-                except OSError as e:
-                    raise Failed(f"Lesefehler bei der Prüfung ({fmt_bytes(offset + done)}): {e.strerror}.")
-                if r == 0:
-                    raise Failed(f"Die Platte lieferte bei {fmt_bytes(offset)} keine Daten mehr.")
-                done += r
+            try:
+                self.pread_all(fd, view, n, offset)
+            except OSError as e:
+                raise Failed(f"Lesefehler bei der Prüfung ({fmt_bytes(offset)}): {e.strerror}.")
             expected = self.seeded_bytes(n, offset) if pattern == SEEDED else zero[:n]
             if buf[:n] != expected:
                 raise Failed(f"Prüfung FEHLGESCHLAGEN: Im Bereich ab {fmt_bytes(offset)} stehen noch Daten, "
                              "die nicht überschrieben wurden. Das Laufwerk (oder der Adapter) arbeitet nicht zuverlässig.")
             offset += n
             self.report(base + offset)
+
+    def verify_samples(self, fd, buf, sample_list, base, expect_equal=True, progress=None):
+        """expect_equal: Daten müssen den Hashes entsprechen (Schnell) bzw. sich verändert haben (Purge)."""
+        view = memoryview(buf)
+        bad = []
+        for i, s in enumerate(sample_list):
+            self.check_cancel()
+            try:
+                self.pread_all(fd, view, MIB, s)
+                same = hashlib.sha256(view[:MIB]).digest() == self.sample_hashes.get(s)
+            except OSError:
+                same = None
+            if same is None or same != expect_equal:
+                bad.append(s)
+            if progress:
+                progress(i + 1, len(sample_list))
+            else:
+                self.report(base + (i + 1) * MIB)
+        n = len(sample_list)
+        if bad:
+            where = ", ".join(fmt_bytes(b) for b in bad[:3])
+            return False, f"{len(bad)} von {n} geprüften Stellen auffällig (z. B. bei {where})."
+        if expect_equal:
+            return True, f"bestanden – {n} Stellen (je 1 MiB, inkl. Anfang und Ende) gelesen und verglichen"
+        return True, f"bestanden – alle {n} vorher geschriebenen Prüfmarken sind verschwunden"
 
     def trim_all(self, fd, size) -> str:
         offset = 0
@@ -301,13 +464,369 @@ class Engine:
                 self.write_status()
         return "durchgeführt – alle Blöcke freigegeben"
 
+    # -- Nur prüfen / Oberflächentest ------------------------------------------------
+
+    def run_check(self) -> int:
+        fd, size = self.open_disk(write=False)
+        try:
+            buf = mmap.mmap(-1, CHUNK)
+            view = memoryview(buf)
+            zero = bytes(CHUNK)
+            self.status.diskSize = size
+            self.status.stepCount = 1
+            self.status.step = 1
+            self.status.bytesTotal = size
+            self.status.state = "running"
+            self.status.startedAt = time.time()
+            self.status.phase = "Alle Sektoren lesen"
+            self.status.curve = []
+            self.status.nonZeroBytes = 0
+            self.status.badBlocks = 0
+            bucket_size = max(CHUNK, size // CURVE)
+            bucket_start, bucket_t = 0, time.time()
+            offset = 0
+            while offset < size:
+                self.check_cancel()
+                n = min(CHUNK, size - offset)
+                try:
+                    self.pread_all(fd, view, n, offset)
+                    ok = True
+                except OSError:
+                    ok = False
+                if ok:
+                    if buf[:n] != zero[:n]:
+                        self.status.nonZeroBytes += self.count_nonzero(view, n)
+                else:
+                    self.read_slowly(fd, view, n, offset)
+                offset += n
+                if offset - bucket_start >= bucket_size or offset >= size:
+                    dt = max(1e-6, time.time() - bucket_t)
+                    self.status.curve.append(round((offset - bucket_start) / dt / 1e6, 1))
+                    bucket_start, bucket_t = offset, time.time()
+                self.report(offset)
+        finally:
+            os.close(fd)
+        s = self.status
+        empty = s.nonZeroBytes == 0
+        if s.badBlocks:
+            msg = (f"{s.badBlocks} unlesbare Bereiche (je 64 KiB) gefunden – das Laufwerk ist beschädigt. ")
+        else:
+            msg = "Alle Sektoren sind lesbar. "
+        if empty:
+            msg += "Das Laufwerk ist leer (nur Nullen)."
+        else:
+            pct = str(round(s.nonZeroBytes / size * 100, 1)).replace(".", ",")
+            msg += f"{fmt_bytes(s.nonZeroBytes)} ({pct} %) enthalten Daten (nicht nur Nullen)."
+        s.verified = empty and not s.badBlocks
+        return self.finish("done", msg)
+
+    @staticmethod
+    def count_nonzero(view, n) -> int:
+        zero = bytes(MIB)
+        total = 0
+        for o in range(0, n, MIB):
+            m = min(MIB, n - o)
+            if view[o:o + m] != zero[:m]:
+                total += m
+        return total
+
+    def read_slowly(self, fd, view, n, offset):
+        """Bei einem Lesefehler: den Block in 64-KiB-Stücken lesen und defekte Stücke zählen."""
+        zero = bytes(SUB)
+        for o in range(0, n, SUB):
+            m = min(SUB, n - o)
+            try:
+                self.pread_all(fd, view[o:o + m], m, offset + o)
+                if view[o:o + m] != zero[:m]:
+                    self.status.nonZeroBytes += m
+            except OSError:
+                self.status.badBlocks += 1
+                if self.status.badBlocks >= MAX_BAD:
+                    raise Failed(f"Mehr als {MAX_BAD} unlesbare Bereiche – Test abgebrochen. Das Laufwerk ist stark beschädigt.")
+
+    # -- Firmware-Löschung ------------------------------------------------------------
+
+    def run_purge(self) -> int:
+        d = self.disk
+        if not d.direct_attached:
+            raise Failed("Die Firmware-Löschung ist nur bei direkt angeschlossenen SATA- oder NVMe-Laufwerken "
+                         "möglich. USB-Adapter leiten die Befehle nicht zuverlässig weiter.")
+        self.status.state = "running"
+        self.status.startedAt = time.time()
+        self.status.stepCount = 3
+        self.status.bytesTotal = 1000
+
+        # 1) Prüfmarken schreiben
+        self.status.step = 1
+        self.status.phase = "Prüfmarken schreiben"
+        self.write_status()
+        fd, size = self.open_disk()
+        self.status.diskSize = size
+        buf = mmap.mmap(-1, CHUNK)
+        view = memoryview(buf)
+        markers = self.pick_samples(size, MARKERS)
+        try:
+            for i, s in enumerate(markers):
+                self.check_cancel()
+                buf[:MIB] = os.urandom(MIB)
+                self.sample_hashes[s] = hashlib.sha256(view[:MIB]).digest()
+                self.pwrite_all(fd, view, MIB, s, size)
+                self.report(int(50 * (i + 1) / len(markers)))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+        # 2) Firmware-Befehl
+        self.status.step = 2
+        self.check_cancel()
+        if d.name.startswith("nvme"):
+            self.purge_nvme()
+        else:
+            self.purge_ata()
+        self.status.indeterminate = False
+        try:
+            fd = os.open(f"/dev/{self.disk_name}", os.O_RDONLY)
+            fcntl.ioctl(fd, BLKRRPART)
+            os.close(fd)
+        except OSError:
+            pass
+
+        # 3) Kontrolle
+        self.status.step = 3
+        self.status.phase = "Prüfmarken kontrollieren"
+        self.report(950, force=True)
+        fd = os.open(f"/dev/{self.disk_name}", os.O_RDONLY | os.O_DIRECT)
+        try:
+            ok, text = self.verify_samples(fd, buf, markers, 0, expect_equal=False,
+                                           progress=lambda i, n: self.report(950 + int(50 * i / n)))
+        finally:
+            os.close(fd)
+        self.status.sampleResult = text
+        self.status.verified = ok
+        if not ok:
+            raise Failed("Die Firmware-Löschung wurde gemeldet, aber " + text +
+                         " Die Löschung war vermutlich wirkungslos – bitte »Sicher« oder »SSD« verwenden.")
+        return self.finish("done", f"Das Laufwerk hat sich selbst gelöscht ({self.status.purgeMethod}). "
+                                   "Die Kontrolle der Prüfmarken war erfolgreich.")
+
+    def firmware_progress(self, fraction: float, label: str):
+        self.status.phase = label
+        self.report(50 + int(900 * max(0.0, min(1.0, fraction))), force=True)
+
+    def wait_with_estimate(self, proc_fn, minutes: float, label: str):
+        """Wartet auf einen blockierenden Befehl und schätzt den Fortschritt anhand der Herstellerangabe."""
+        result = {}
+        t = threading.Thread(target=lambda: result.update(r=proc_fn()), daemon=True)
+        t.start()
+        start = time.time()
+        est = max(60.0, minutes * 60)
+        while t.is_alive():
+            t.join(2)
+            frac = min(0.97, (time.time() - start) / est)
+            self.firmware_progress(frac, label)
+        return result.get("r", (-1, ""))
+
+    # NVMe
+
+    def nvme_json(self, args):
+        code, out = run(["nvme"] + args + ["-o", "json"], timeout=60)
+        if code != 0:
+            return None
+        try:
+            return json.loads(out[out.index("{"):])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def find_key(obj, key):
+        if isinstance(obj, dict):
+            if key in obj:
+                return obj[key]
+            for v in obj.values():
+                r = Engine.find_key(v, key)
+                if r is not None:
+                    return r
+        elif isinstance(obj, list):
+            for v in obj:
+                r = Engine.find_key(v, key)
+                if r is not None:
+                    return r
+        return None
+
+    def purge_nvme(self):
+        if not shutil.which("nvme"):
+            raise Failed("Das Programm »nvme« (Paket nvme-cli) fehlt. Bitte installieren: sudo apt install nvme-cli")
+        ns = f"/dev/{self.disk_name}"
+        ctrl = re.sub(r"n\d+$", "", ns)
+        idc = self.nvme_json(["id-ctrl", ctrl]) or {}
+        sanicap = int(self.find_key(idc, "sanicap") or 0)
+        fna = int(self.find_key(idc, "fna") or 0)
+        if sanicap & 0x1 or sanicap & 0x2:
+            crypto = bool(sanicap & 0x1)
+            self.status.purgeMethod = "NVMe Sanitize – " + ("Crypto Erase" if crypto else "Block Erase")
+            self.firmware_progress(0, "Firmware-Löschung wird gestartet …")
+            code, out = run(["nvme", "sanitize", ctrl, "-a", "4" if crypto else "2"], timeout=120)
+            if code != 0:
+                raise Failed(f"Das Laufwerk hat den Sanitize-Befehl abgelehnt: {out.strip()[-300:]}")
+            started = time.time()
+            while True:
+                time.sleep(2)
+                log = self.nvme_json(["sanitize-log", ctrl]) or {}
+                sprog = self.find_key(log, "sprog")
+                sstat = self.find_key(log, "sstat")
+                st = int(sstat or 0) & 0x7
+                if st in (1, 4) and time.time() - started > 3:
+                    break
+                if st == 3:
+                    raise Failed("Die Firmware-Löschung (Sanitize) ist fehlgeschlagen. Das Laufwerk meldet einen Fehler.")
+                frac = (int(sprog) / 65536) if sprog is not None and st == 2 else 0
+                self.firmware_progress(frac, f"Firmware-Löschung läuft ({int(frac * 100)} %) – nicht ausschalten")
+                if time.time() - started > 6 * 3600:
+                    raise Failed("Die Firmware-Löschung dauert ungewöhnlich lange. Bitte den Zustand prüfen.")
+            return
+        # Kein Sanitize: Format mit »User Data Erase« bzw. »Cryptographic Erase«
+        idn = self.nvme_json(["id-ns", ns]) or {}
+        lbaf = int(self.find_key(idn, "flbas") or 0) & 0xF
+        ses = "2" if fna & 0x4 else "1"
+        self.status.purgeMethod = "NVMe Format – " + ("Cryptographic Erase" if ses == "2" else "User Data Erase")
+        self.status.indeterminate = True
+        cmd = ["nvme", "format", ns, "-s", ses, "-l", str(lbaf), "--force"]
+
+        def do():
+            code, out = run(cmd, timeout=6 * 3600)
+            if code != 0 and "force" in out:
+                code, out = run(cmd[:-1], timeout=6 * 3600)
+            return code, out
+        code, out = self.wait_with_estimate(do, 2, "Firmware-Löschung läuft – nicht ausschalten")
+        if code != 0:
+            raise Failed(f"Das Laufwerk hat den Format-Befehl abgelehnt: {out.strip()[-300:]}")
+
+    # ATA
+
+    def purge_ata(self):
+        if not shutil.which("hdparm"):
+            raise Failed("Das Programm »hdparm« fehlt. Bitte installieren: sudo apt install hdparm")
+        dev = f"/dev/{self.disk_name}"
+        code, info = run(["hdparm", "-I", dev], timeout=30)
+        if code != 0:
+            raise Failed("Die Laufwerksinformationen konnten nicht gelesen werden (hdparm -I).")
+        feats = info.lower()
+        if "sanitize feature set" in feats and ("crypto_scramble_ext" in feats or "block_erase_ext" in feats):
+            crypto = "crypto_scramble_ext" in feats
+            opt = "--sanitize-crypto-scramble" if crypto else "--sanitize-block-erase"
+            self.status.purgeMethod = "ATA Sanitize – " + ("Crypto Scramble" if crypto else "Block Erase")
+            self.firmware_progress(0, "Firmware-Löschung wird gestartet …")
+            code, out = run(["hdparm", "--yes-i-know-what-i-am-doing", opt, dev], timeout=120)
+            if code != 0:
+                raise Failed(f"Das Laufwerk hat den Sanitize-Befehl abgelehnt: {out.strip()[-300:]}")
+            started = time.time()
+            while True:
+                time.sleep(3)
+                code, out = run(["hdparm", "--sanitize-status", dev], timeout=30)
+                low = out.lower()
+                m = re.search(r"\((\d+)%\)", out)
+                if "in process" in low or "sd2" in low:
+                    frac = int(m.group(1)) / 100 if m else 0
+                    self.firmware_progress(frac, f"Firmware-Löschung läuft ({int(frac * 100)} %) – nicht ausschalten")
+                elif "completed with error" in low or "failure" in low:
+                    raise Failed("Die Firmware-Löschung (Sanitize) ist fehlgeschlagen.")
+                elif time.time() - started > 4:
+                    break
+                if time.time() - started > 12 * 3600:
+                    raise Failed("Die Firmware-Löschung dauert ungewöhnlich lange. Bitte den Zustand prüfen.")
+            return
+
+        sec = info[info.find("Security:"):]
+        sec_low = sec.lower()
+        if "security:" not in sec_low or "supported" not in sec_low:
+            raise Failed("Dieses Laufwerk unterstützt weder »Sanitize« noch »Secure Erase«. "
+                         "Bitte den Modus »SSD« bzw. »Sicher« verwenden.")
+        if re.search(r"\n\s*frozen", sec_low) and not re.search(r"not\s+frozen", sec_low):
+            raise Failed("Das Laufwerk ist »eingefroren« (frozen) – das BIOS sperrt Sicherheitsbefehle beim Start. "
+                         "Lösung: Rechner in den Standby (Bereitschaft) versetzen, wieder aufwecken und die "
+                         "Firmware-Löschung sofort erneut starten.")
+        if re.search(r"\n\s*enabled", sec_low) and not re.search(r"not\s+enabled", sec_low):
+            raise Failed("Auf dem Laufwerk ist bereits ein ATA-Passwort gesetzt. WipeKit verändert es nicht.")
+        if re.search(r"\n\s*locked", sec_low) and not re.search(r"not\s+locked", sec_low):
+            raise Failed("Das Laufwerk ist per ATA-Passwort gesperrt.")
+        enhanced = "supported: enhanced erase" in sec_low
+        mins = re.findall(r"(\d+)min for (enhanced )?security erase unit", sec_low)
+        est = 2.0
+        for mm, enh in mins:
+            if bool(enh) == enhanced:
+                est = float(mm)
+        pw = "WipeKit"
+        self.status.purgeMethod = "ATA Secure Erase" + (" (Enhanced)" if enhanced else "")
+        self.firmware_progress(0, "Temporäres ATA-Passwort wird gesetzt …")
+        code, out = run(["hdparm", "--user-master", "u", "--security-set-pass", pw, dev], timeout=60)
+        if code != 0:
+            raise Failed(f"Das temporäre ATA-Passwort konnte nicht gesetzt werden: {out.strip()[-300:]}")
+        erase = "--security-erase-enhanced" if enhanced else "--security-erase"
+        code, out = self.wait_with_estimate(
+            lambda: run(["hdparm", "--user-master", "u", erase, pw, dev], timeout=int(est * 60 * 3 + 600)),
+            est, "Firmware-Löschung läuft – nicht ausschalten oder trennen")
+        if code != 0:
+            run(["hdparm", "--user-master", "u", "--security-disable", pw, dev], timeout=60)
+            raise Failed(f"Secure Erase ist fehlgeschlagen: {out.strip()[-300:]} "
+                         "Das temporäre Passwort wurde wieder entfernt.")
+        # Nach erfolgreichem Secure Erase ist das Passwort automatisch entfernt – sicherheitshalber prüfen
+        code, info = run(["hdparm", "-I", dev], timeout=30)
+        sec = info[info.find("Security:"):].lower()
+        if re.search(r"\n\s*enabled", sec) and not re.search(r"not\s+enabled", sec):
+            run(["hdparm", "--user-master", "u", "--security-disable", pw, dev], timeout=60)
+
+    # -- Selbsttest --------------------------------------------------------------------------
+
+    def run_selftest(self, test: str) -> int:
+        d = self.disk
+        self.status.state = "running"
+        self.status.startedAt = time.time()
+        self.status.stepCount = 1
+        self.status.step = 1
+        self.status.bytesTotal = 100
+        title = {"short": "Kurztest", "long": "Langtest", "conveyance": "Transporttest"}[test]
+        ok, msg = smartread.self_test(d.path, self.devtype, test)
+        if not ok:
+            raise Failed(f"Der {title} konnte nicht gestartet werden. {msg}".strip())
+        self.status.phase = f"{title} läuft im Laufwerk"
+        self.write_status()
+        time.sleep(5)
+        while True:
+            self.check_cancel()
+            res = smartread.read_smart(d.path, d.transport)
+            j = res.get("json") or {}
+            self.write_file("smart-after.json", json.dumps(j))
+            remaining = None
+            st = ((j.get("ata_smart_data") or {}).get("self_test") or {}).get("status") or {}
+            if (st.get("value", 0) >> 4) == 0xF:
+                remaining = st.get("remaining_percent", 100)
+            nlog = j.get("nvme_self_test_log") or {}
+            if (nlog.get("current_self_test_operation") or {}).get("value", 0):
+                remaining = 100 - (nlog.get("current_self_test_completion_percent") or 0)
+            if remaining is None:
+                break
+            self.report(100 - int(remaining), force=True)
+            for _ in range(15):
+                time.sleep(2)
+                self.check_cancel()
+        # Ergebnis aus dem Selbsttest-Protokoll
+        import health
+        h = health.parse(j)
+        if h.self_tests:
+            last = h.self_tests[0]
+            self.status.message = f"{last.kind}: {last.result}"
+            if last.passed is False:
+                return self.finish("failed", f"{title} fehlgeschlagen: {last.result}")
+        return self.finish("done", f"{title} ohne Fehler abgeschlossen.")
+
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="WipeKit Lösch-Prozess")
+    p = argparse.ArgumentParser(description="WipeKit Arbeitsprozess")
     p.add_argument("--disk", required=True)
     p.add_argument("--mode", required=True)
     p.add_argument("--job-dir", required=True)
     p.add_argument("--expected-size", type=int, default=0)
+    p.add_argument("--internal-ok", action="store_true")
     p.add_argument("--allow-loop", action="store_true", help=argparse.SUPPRESS)   # nur für automatische Tests
     a = p.parse_args()
     # Arbeitsordner muss ein echter Ordner unter /tmp/wipekit-<uid>/ sein (kein Symlink)
@@ -316,7 +835,8 @@ def main() -> int:
     if (not os.path.basename(parent).startswith("wipekit-") or os.path.dirname(parent) != "/tmp"
             or os.path.islink(job_dir) or os.path.islink(parent) or not os.path.isdir(job_dir)):
         return 2
-    return Engine(a.disk, a.mode, job_dir, a.expected_size, allow_loop=a.allow_loop).run()
+    return Engine(a.disk, a.mode, job_dir, a.expected_size, allow_loop=a.allow_loop,
+                  internal_ok=a.internal_ok).run()
 
 
 if __name__ == "__main__":

@@ -178,16 +178,20 @@ jobs:
       - name: Abhängigkeiten für den Test installieren
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 adwaita-icon-theme librsvg2-common xvfb dbus-x11
+          sudo apt-get install -y --no-install-recommends python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 \
+            adwaita-icon-theme librsvg2-common xvfb dbus-x11 smartmontools hdparm nvme-cli qpdf poppler-utils
 
       - name: Python-Code prüfen
         run: |
-          python3 -m py_compile linux/wipekit/common.py linux/wipekit/wipekit_gui.py
-          python3 -c "import ast,sys; ast.parse(open('linux/wipekit/wipekit-helper').read())"
+          for f in linux/wipekit/*.py linux/wipekit/wipekit-helper linux/wipekit/wipekit-diag; do
+            python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$f"
+          done
+          python3 tests/test_core.py
 
       - name: Oberfläche prüfen
         env:
           WIPEKIT_SHOTS: ${{ github.workspace }}/screenshots
+          WIPEKIT_REPORTS: ${{ github.workspace }}/screenshots/berichte
         run: xvfb-run -a -s "-screen 0 1280x900x24" dbus-run-session -- python3 linux/wipekit/wipekit_gui.py --smoke-test
 
       - uses: actions/upload-artifact@v7
@@ -197,22 +201,46 @@ jobs:
           path: screenshots/
           if-no-files-found: ignore
 
-      - name: Echtes Löschen testen (eingehängtes Loop-Gerät, als root)
+      - name: Diagnose testen (S.M.A.R.T. aller Laufwerke lesen, als root)
+        run: |
+          sudo python3 linux/wipekit/wipekit-diag > "$RUNNER_TEMP/diag.json"
+          python3 - "$RUNNER_TEMP/diag.json" <<'PY'
+          import json, sys
+          sys.path.insert(0, "linux/wipekit")
+          import health
+          data = json.load(open(sys.argv[1]))
+          for name, e in data["disks"].items():
+              h = health.parse(e["smart"])
+              print(name, "->", h.rating, "|", h.model or "-", "|", h.reason or "; ".join(h.reasons))
+          PY
+
+      - name: Echtes Löschen und Prüfen testen (Loop-Gerät, als root)
         run: |
           truncate -s 64M "$RUNNER_TEMP/wk.img"
           LOOP=$(sudo losetup --show -f "$RUNNER_TEMP/wk.img")
           sudo mkfs.ext4 -q "$LOOP"
           sudo mkdir -p /mnt/wktest && sudo mount "$LOOP" /mnt/wktest
           echo "Testdaten" | sudo tee /mnt/wktest/test.txt > /dev/null
-          BASE="/tmp/wipekit-$(id -u)"; JOB="$BASE/ci-test"
-          mkdir -p "$JOB"; chmod 700 "$BASE" "$JOB"
-          sudo python3 linux/wipekit/wipekit-helper --disk "$(basename "$LOOP")" --mode ssd --job-dir "$JOB" --allow-loop || true
-          echo "--- status.json"; cat "$JOB/status.json"; echo
+          BASE="/tmp/wipekit-$(id -u)"; mkdir -p "$BASE"; chmod 700 "$BASE"
+          run() {  # Modus, erwartetes Feld
+            JOB="$BASE/ci-$1"; mkdir -p "$JOB"; chmod 700 "$JOB"
+            sudo python3 linux/wipekit/wipekit-helper --disk "$(basename "$LOOP")" --mode "$1" --job-dir "$JOB" --allow-loop || true
+            echo "--- $1:"; cat "$JOB/status.json"; echo
+            python3 -c "import json,sys; s=json.load(open('$JOB/status.json')); sys.exit(0 if s['state']=='done' and s['verified'] else 1)"
+          }
+          run ssd
+          run quick
+          run secure
+          run check          # nach »Sicher« muss das Laufwerk leer sein
           sudo losetup -d "$LOOP" || true
-          python3 -c "import json,sys; s=json.load(open('$JOB/status.json')); sys.exit(0 if s['state']=='done' and s['verified'] else 1)"
 
       - name: Pakete bauen
         run: bash linux/build.sh "$VERSION"
+
+      - name: Paket prüfen
+        run: |
+          dpkg-deb -c dist/*.deb | grep -E "wipekit-diag|health.py|reports.py|report-logo.jpg|THIRD-PARTY"
+          dpkg-deb -f dist/*.deb Depends
 
       - uses: actions/upload-artifact@v7
         with:

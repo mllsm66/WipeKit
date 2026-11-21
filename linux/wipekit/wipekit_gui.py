@@ -4,6 +4,7 @@
 import json
 import math
 import os
+import platform
 import shutil
 import socket
 import subprocess
@@ -23,14 +24,19 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from common import (  # noqa: E402
-    ACTIVE_STATES, APP_ID, APP_NAME, MODES, MODES_BY_KEY, SEEDED, VERSION, Disk, HelperStatus,
+    ACTIVE_STATES, APP_ID, APP_NAME, MODES, MODES_BY_KEY, VERSION, Disk, HelperStatus,
     fmt_bytes, fmt_clock, fmt_datetime, fmt_duration, fmt_exact_bytes, fmt_percent, fmt_short_duration,
-    fmt_speed, list_external_disks, pid_alive, recommended_mode,
+    fmt_speed, list_disks, pid_alive, recommended_mode,
 )
+import health as hl  # noqa: E402
+import reports as rp  # noqa: E402
 
-HELPER = Path(__file__).resolve().parent / "wipekit-helper"
-ICON_DIR = Path(__file__).resolve().parent / "icons"
+HERE = Path(__file__).resolve().parent
+HELPER = HERE / "wipekit-helper"
+DIAG = HERE / "wipekit-diag"
+ICON_DIR = HERE / "icons"
 BASE_DIR = Path(f"/tmp/wipekit-{os.getuid()}")
+CHUNK = 4 * 1024 * 1024
 
 COLORS = {
     "accent": (0.21, 0.52, 0.89),
@@ -38,11 +44,28 @@ COLORS = {
     "failed": (0.88, 0.11, 0.14),
     "cancelled": (1.0, 0.47, 0.0),
 }
+RATING_CSS = {hl.VERY_GOOD: "success", hl.GOOD: "accent", hl.CAUTION: "warning", hl.BAD: "error",
+              hl.UNKNOWN: "dim-label"}
+
+USB_HELP = ("Viele USB-Gehäuse und -Adapter geben die Gesundheitsdaten nicht weiter. WipeKit probiert "
+            "automatisch alle bekannten Adapter-Typen (SAT, ASMedia, JMicron, Realtek). Klappt es trotzdem "
+            "nicht: das Laufwerk intern per SATA oder NVMe anschließen oder ein USB-Gehäuse mit ASMedia-, "
+            "JMicron- oder Realtek-Chip verwenden. Der Oberflächentest funktioniert auch ohne diese Daten.")
 
 
-def protocol_folder() -> Path:
+def reports_folder() -> Path:
     docs = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS) or str(Path.home() / "Documents")
     return Path(docs) / "WipeKit-Protokolle"
+
+
+def os_label() -> str:
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "Linux " + platform.release()
 
 
 def open_path(path: Path):
@@ -63,6 +86,24 @@ def row(title: str, subtitle: str = None, prop: bool = False) -> Adw.ActionRow:
     return r
 
 
+def value_row(title: str, value: str, css=None) -> Adw.ActionRow:
+    """Zeile mit Bezeichnung links und Wert rechts (gut lesbar, wie in den Systemeinstellungen)."""
+    r = Adw.ActionRow()
+    r.set_use_markup(False)
+    r.set_title(title)
+    v = Gtk.Label(label=value, xalign=1.0, wrap=True, selectable=True)
+    v.set_max_width_chars(36)
+    v.set_justify(Gtk.Justification.RIGHT)
+    v.add_css_class("numeric")
+    if css:
+        v.add_css_class(css)
+    else:
+        v.add_css_class("dim-label")
+    r.add_suffix(v)
+    r.value_label = v
+    return r
+
+
 def label(text: str = "", css=(), wrap=False, xalign=0.0) -> Gtk.Label:
     lb = Gtk.Label(label=text)
     lb.set_xalign(xalign)
@@ -72,8 +113,15 @@ def label(text: str = "", css=(), wrap=False, xalign=0.0) -> Gtk.Label:
     return lb
 
 
+def load_health(path: Path):
+    try:
+        return hl.parse_text(path.read_text())
+    except OSError:
+        return None
+
+
 # ---------------------------------------------------------------------------
-# Fortschrittsring
+# Fortschrittsring, Punkt und Geschwindigkeitskurve
 # ---------------------------------------------------------------------------
 
 class Ring(Gtk.DrawingArea):
@@ -105,8 +153,96 @@ class Ring(Gtk.DrawingArea):
             cr.stroke()
 
 
+class Dot(Gtk.DrawingArea):
+    def __init__(self, color, size=10):
+        super().__init__()
+        self.color = color
+        self.set_content_width(size)
+        self.set_content_height(size)
+        self.set_valign(Gtk.Align.CENTER)
+        self.set_draw_func(self._draw)
+
+    def _draw(self, area, cr, w, h, *args):
+        cr.set_source_rgb(*self.color)
+        cr.arc(w / 2, h / 2, min(w, h) / 2, 0, 2 * math.pi)
+        cr.fill()
+
+
+class Curve(Gtk.DrawingArea):
+    """Lesegeschwindigkeit über die Position auf dem Laufwerk."""
+
+    def __init__(self):
+        super().__init__()
+        self.values = []
+        self.total = 200
+        self.set_content_height(150)
+        self.set_hexpand(True)
+        self.set_draw_func(self._draw)
+
+    def update(self, values, total):
+        self.values = values or []
+        self.total = max(1, total)
+        self.queue_draw()
+
+    def _draw(self, area, cr, w, h, *args):
+        try:
+            c = self.get_color() if hasattr(self, "get_color") else self.get_style_context().get_color()
+            fg = (c.red, c.green, c.blue)
+        except Exception:
+            fg = (0.5, 0.5, 0.5)
+        pad_l, pad_b, pad_t = 44, 18, 8
+        gw, gh = w - pad_l - 6, h - pad_b - pad_t
+        vmax = max(self.values) * 1.15 if self.values else 100
+        vmax = max(vmax, 1)
+        cr.set_line_width(1)
+        cr.set_source_rgba(*fg, 0.15)
+        for i in range(5):
+            y = pad_t + gh * i / 4
+            cr.move_to(pad_l, y)
+            cr.line_to(pad_l + gw, y)
+        cr.stroke()
+        cr.set_source_rgba(*fg, 0.6)
+        cr.select_font_face("Sans")
+        cr.set_font_size(10)
+        for i in range(5):
+            v = vmax * (4 - i) / 4
+            txt = f"{v:.0f}"
+            ext = cr.text_extents(txt)
+            cr.move_to(pad_l - 6 - ext.width, pad_t + gh * i / 4 + 4)
+            cr.show_text(txt)
+        cr.move_to(pad_l, h - 4)
+        cr.show_text("Anfang")
+        ext = cr.text_extents("Ende")
+        cr.move_to(pad_l + gw - ext.width, h - 4)
+        cr.show_text("Ende")
+        ext = cr.text_extents("MB/s")
+        cr.move_to(pad_l + (gw - ext.width) / 2, h - 4)
+        cr.show_text("MB/s")
+        if len(self.values) < 1:
+            return
+        pts = [(pad_l + gw * (i + 0.5) / self.total, pad_t + gh * (1 - v / vmax)) for i, v in enumerate(self.values)]
+        cr.set_source_rgba(*COLORS["accent"], 0.18)
+        cr.move_to(pts[0][0], pad_t + gh)
+        for x, y in pts:
+            cr.line_to(x, y)
+        cr.line_to(pts[-1][0], pad_t + gh)
+        cr.close_path()
+        cr.fill()
+        cr.set_source_rgb(*COLORS["accent"])
+        cr.set_line_width(1.8)
+        cr.move_to(*pts[0])
+        for x, y in pts[1:]:
+            cr.line_to(x, y)
+        cr.stroke()
+
+
+def curve_total(size: int) -> int:
+    bucket = max(CHUNK, size // 200) if size else CHUNK
+    return max(1, math.ceil((size or 1) / bucket))
+
+
 # ---------------------------------------------------------------------------
-# Löschvorgang (Oberflächen-Seite)
+# Vorgang (Oberflächen-Seite)
 # ---------------------------------------------------------------------------
 
 class Job:
@@ -115,20 +251,42 @@ class Job:
         self.id = info["id"]
         self.disk = Disk(**info["disk"])
         self.mode = MODES_BY_KEY[info["mode"]]
+        self.purpose = info.get("purpose", "")
         self.dir = job_dir
         self.proc = proc
         self.status = None
         self.state = "starting"
         self.message = None
         self.cancel_requested = False
-        self.reported = (job_dir / "protocol_path").exists()
-        self.protocol = None
+        self.reports = {}
+        self.reported = (job_dir / "reports.json").exists()
         if self.reported:
             try:
-                self.protocol = Path((job_dir / "protocol_path").read_text().strip())
-            except OSError:
+                self.reports = json.loads((job_dir / "reports.json").read_text())
+            except (OSError, ValueError):
                 pass
         self.dismissed = False
+
+    @property
+    def kind(self) -> str:
+        if self.mode.key.startswith("selftest"):
+            return "selftest"
+        if self.mode.read_only:
+            return "check"
+        return "wipe"
+
+    @property
+    def title(self) -> str:
+        if self.kind == "selftest":
+            return self.mode.title
+        if self.kind == "check":
+            return "Oberflächentest" if self.purpose == "scan" else "Prüfung"
+        return "Löschen"
+
+    @property
+    def protocol(self):
+        p = self.reports.get("pdf")
+        return Path(p) if p else None
 
     @property
     def active(self) -> bool:
@@ -146,7 +304,7 @@ class Job:
         s = self.status
         if not s or s.state != "running" or s.speed <= 1 or s.bytesTotal <= s.bytesDoneTotal:
             return None
-        if time.time() - s.startedAt < 15:
+        if self.kind == "selftest" or self.mode.purge or time.time() - s.startedAt < 15:
             return None
         return (s.bytesTotal - s.bytesDoneTotal) / s.speed
 
@@ -159,7 +317,22 @@ class Job:
 
     @property
     def color(self):
+        if self.state == "done" and self.kind == "check" and self.status and self.status.badBlocks:
+            return COLORS["failed"]
         return COLORS.get(self.state, COLORS["accent"])
+
+    @property
+    def done_text(self) -> str:
+        if self.kind == "wipe":
+            return "Erfolgreich gelöscht"
+        if self.kind == "selftest":
+            return "Ohne Fehler abgeschlossen"
+        s = self.status
+        if s and s.badBlocks:
+            return "Unlesbare Bereiche gefunden"
+        if self.purpose == "scan":
+            return "Alle Sektoren lesbar"
+        return "Laufwerk ist leer" if s and s.nonZeroBytes == 0 else "Laufwerk enthält Daten"
 
     @property
     def short_status(self) -> str:
@@ -168,7 +341,7 @@ class Job:
         if self.state == "running":
             e = self.eta
             return f"{fmt_percent(self.fraction)} · noch {fmt_short_duration(e)}" if e else fmt_percent(self.fraction)
-        return {"done": "Erfolgreich gelöscht", "failed": "Fehlgeschlagen", "cancelled": "Abgebrochen"}[self.state]
+        return {"done": self.done_text, "failed": "Fehlgeschlagen", "cancelled": "Abgebrochen"}[self.state]
 
     def poll(self):
         """Liest status.json. Gibt True zurück, wenn sich der Zustand geändert hat."""
@@ -179,8 +352,8 @@ class Job:
             self.message = self.status.message
             if self.active and not pid_alive(self.status.pid) and time.time() - self.status.updatedAt > 10:
                 self.state = "failed"
-                self.message = ("Der Löschprozess wurde unerwartet beendet (Absturz oder Neustart?). "
-                                "Das Laufwerk ist nur teilweise überschrieben.")
+                self.message = ("Der Arbeitsprozess wurde unerwartet beendet (Absturz oder Neustart?)."
+                                + (" Das Laufwerk ist nur teilweise überschrieben." if self.kind == "wipe" else ""))
         except (OSError, ValueError):
             if self.proc is not None and self.proc.poll() is not None:
                 code = self.proc.returncode
@@ -197,10 +370,10 @@ class Job:
                         log = (self.dir / "pkexec.log").read_text().strip()[-300:]
                     except OSError:
                         pass
-                    self.message = f"Der Löschprozess konnte nicht gestartet werden (Code {code}). {log}".strip()
+                    self.message = f"Der Arbeitsprozess konnte nicht gestartet werden (Code {code}). {log}".strip()
             elif self.proc is None and time.time() - self.info["createdAt"] > 60:
                 self.state = "failed"
-                self.message = "Der Löschprozess konnte nicht gestartet werden."
+                self.message = "Der Arbeitsprozess konnte nicht gestartet werden."
         return before != self.state
 
     def request_cancel(self):
@@ -218,43 +391,61 @@ class Job:
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title=APP_NAME)
-        self.set_default_size(1000, 720)
-        self.set_size_request(860, 560)
+        self.set_default_size(1060, 760)
+        self.set_size_request(880, 580)
         self.app = app
         self.disks = []
         self.disk_signature = None
         self.jobs = []
         self.selection = None      # ("disk", name) | ("job", id)
+        self.view = "wipe"         # "wipe" | "diag"
         self.mode_key = "secure"
         self.updating_lists = False
         self.force_close = False
         self.job_page_refs = {}
         self.job_rows = {}
         self.disk_rings = {}
+        self.health = {}           # Laufwerksname -> {"h": Health, "hpa": dict, "t": Zeit}
+        self.diag_state = "idle"   # idle | loading | done | error
+        self.diag_error = ""
+        self.internal_confirm = False
 
         BASE_DIR.mkdir(mode=0o700, exist_ok=True)
+        self._actions()
 
         # --- Seitenleiste ---------------------------------------------------
         sidebar_header = Adw.HeaderBar()
-        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Laufwerke neu einlesen")
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Laufwerke neu einlesen (F5)")
         refresh.connect("clicked", lambda *_: self.refresh_disks(force=True))
         sidebar_header.pack_start(refresh)
+        menu = Gio.Menu()
+        menu.append("Gesundheitsdaten lesen", "win.read-health")
+        menu.append("Ordner mit Berichten öffnen", "win.open-reports")
+        section = Gio.Menu()
+        section.append("Über WipeKit", "app.about")
+        menu.append_section(None, section)
+        menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Hauptmenü")
+        if hasattr(menu_btn, "set_primary"):
+            menu_btn.set_primary(True)
+        sidebar_header.pack_end(menu_btn)
 
-        self.disk_list = Gtk.ListBox()
-        self.disk_list.add_css_class("navigation-sidebar")
-        self.disk_list.connect("row-selected", self.on_row_selected)
-        self.job_list = Gtk.ListBox()
-        self.job_list.add_css_class("navigation-sidebar")
-        self.job_list.connect("row-selected", self.on_row_selected)
+        self.ext_list = self._listbox()
+        self.int_list = self._listbox()
+        self.job_list = self._listbox()
+        for lst in (self.ext_list, self.int_list, self.job_list):
+            lst.connect("row-selected", self.on_row_selected)
         self.no_disks = label("Kein Laufwerk angeschlossen", css=("dim-label",))
         self.no_disks.set_margin_start(18)
         self.no_disks.set_margin_top(6)
-        self.jobs_heading = self.section_heading("Löschvorgänge")
+        self.int_heading = self.section_heading("Interne Laufwerke")
+        self.jobs_heading = self.section_heading("Vorgänge")
 
         side_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         side_box.append(self.section_heading("Externe Laufwerke"))
         side_box.append(self.no_disks)
-        side_box.append(self.disk_list)
+        side_box.append(self.ext_list)
+        side_box.append(self.int_heading)
+        side_box.append(self.int_list)
         side_box.append(self.jobs_heading)
         side_box.append(self.job_list)
         side_scroll = Gtk.ScrolledWindow(vexpand=True)
@@ -273,21 +464,35 @@ class MainWindow(Adw.ApplicationWindow):
         sidebar_view.add_bottom_bar(sleep_box)
         sidebar_page = Adw.NavigationPage(title=APP_NAME, child=sidebar_view)
 
-        # --- Inhalt -------------------------------------------------------------
-        content_header = Adw.HeaderBar()
-        protocols = Gtk.Button(icon_name="folder-documents-symbolic", tooltip_text="Ordner mit den Löschprotokollen öffnen")
-        protocols.connect("clicked", self.on_open_protocols)
-        content_header.pack_end(protocols)
+        # --- Inhalt: Umschalter »Löschen | Diagnose« ------------------------------
+        self.stack = Adw.ViewStack()
+        self.wipe_holder = Adw.Bin()
+        self.diag_holder = Adw.Bin()
+        p1 = self.stack.add_titled(self.wipe_holder, "wipe", "Löschen")
+        p1.set_icon_name("wipekit-shield-symbolic")
+        p2 = self.stack.add_titled(self.diag_holder, "diag", "Diagnose")
+        p2.set_icon_name("wipekit-pulse-symbolic")
+        self.stack.connect("notify::visible-child-name", self.on_view_changed)
+        self.switcher = Adw.ViewSwitcher(stack=self.stack)
+        self.switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+
+        self.content_header = Adw.HeaderBar()
+        reports_btn = Gtk.Button(icon_name="folder-documents-symbolic",
+                                 tooltip_text="Ordner mit Protokollen und Berichten öffnen")
+        reports_btn.connect("clicked", lambda *_: self.on_open_reports())
+        self.content_header.pack_end(reports_btn)
         self.content_view = Adw.ToolbarView()
-        self.content_view.add_top_bar(content_header)
+        self.content_view.add_top_bar(self.content_header)
         self.content_page = Adw.NavigationPage(title=APP_NAME, child=self.content_view)
 
         split = Adw.NavigationSplitView()
         split.set_sidebar(sidebar_page)
         split.set_content(self.content_page)
-        split.set_min_sidebar_width(250)
+        split.set_min_sidebar_width(260)
         split.set_max_sidebar_width(340)
-        self.set_content(split)
+        self.toasts = Adw.ToastOverlay()
+        self.toasts.set_child(split)
+        self.set_content(self.toasts)
 
         self.connect("close-request", self.on_close_request)
 
@@ -298,6 +503,47 @@ class MainWindow(Adw.ApplicationWindow):
             self.show_detail()
         GLib.timeout_add_seconds(1, self.tick)
         GLib.timeout_add_seconds(3, self.periodic_refresh)
+
+    # --- Aktionen und Tastenkürzel --------------------------------------------------
+
+    def _actions(self):
+        def add(name, cb, accels=()):
+            a = Gio.SimpleAction.new(name, None)
+            a.connect("activate", lambda *_: cb())
+            self.add_action(a)
+            if accels:
+                self.app.set_accels_for_action(f"win.{name}", list(accels))
+        add("view-wipe", lambda: self.set_view("wipe"), ["<Control>1"])
+        add("view-diag", lambda: self.set_view("diag"), ["<Control>2"])
+        add("refresh", lambda: self.refresh_disks(force=True), ["F5", "<Control>r"])
+        add("read-health", self.read_health, ["<Control><Shift>r"])
+        add("open-reports", self.on_open_reports, ["<Control>o"])
+
+    @staticmethod
+    def _listbox():
+        lb = Gtk.ListBox()
+        lb.add_css_class("navigation-sidebar")
+        return lb
+
+    def set_view(self, view):
+        self.stack.set_visible_child_name(view)
+        if self.view != view:
+            self.view = view
+            self.show_detail()
+
+    def on_view_changed(self, *_):
+        v = self.stack.get_visible_child_name() or "wipe"
+        if v != self.view:
+            self.view = v
+            self.show_detail()
+
+    def toast(self, text, button=None, action=None):
+        t = Adw.Toast(title=text)
+        t.set_timeout(6)
+        if button and action:
+            t.set_button_label(button)
+            t.connect("button-clicked", lambda *_: action())
+        self.toasts.add_toast(t)
 
     # --- Hilfen ---------------------------------------------------------------
 
@@ -318,6 +564,10 @@ class MainWindow(Adw.ApplicationWindow):
     def active_job_for(self, disk):
         return next((j for j in self.jobs if j.disk.name == disk.name and j.active), None)
 
+    def health_for(self, disk):
+        e = self.health.get(disk.name)
+        return e["h"] if e else None
+
     # --- Laufwerke ------------------------------------------------------------
 
     def periodic_refresh(self):
@@ -325,8 +575,8 @@ class MainWindow(Adw.ApplicationWindow):
         return True
 
     def refresh_disks(self, force=False):
-        disks = list_external_disks()
-        sig = [(d.name, d.size, d.model, tuple(d.volumes), d.is_protected) for d in disks]
+        disks = list_disks()
+        sig = [(d.name, d.size, d.model, tuple(d.volumes), d.is_protected, d.internal) for d in disks]
         if sig == self.disk_signature and not force:
             return
         self.disk_signature = sig
@@ -334,7 +584,8 @@ class MainWindow(Adw.ApplicationWindow):
         if self.selection and self.selection[0] == "disk" and not self.find_disk(self.selection[1]):
             self.selection = None
         if self.selection is None:
-            first = next((d for d in disks if not d.is_protected and not self.active_job_for(d)), None)
+            first = next((d for d in disks if not d.internal and not d.is_protected and not self.active_job_for(d)),
+                         None) or (disks[0] if disks else None)
             if first:
                 self.select(("disk", first.name))
         self.rebuild_disk_list()
@@ -342,9 +593,13 @@ class MainWindow(Adw.ApplicationWindow):
 
     def rebuild_disk_list(self):
         self.updating_lists = True
-        self.disk_list.remove_all()
+        self.ext_list.remove_all()
+        self.int_list.remove_all()
         self.disk_rings = {}
-        self.no_disks.set_visible(not self.disks)
+        ext = [d for d in self.disks if not d.internal]
+        inner = [d for d in self.disks if d.internal]
+        self.no_disks.set_visible(not ext)
+        self.int_heading.set_visible(bool(inner))
         for d in self.disks:
             r = Gtk.ListBoxRow()
             r.key = ("disk", d.name)
@@ -358,21 +613,28 @@ class MainWindow(Adw.ApplicationWindow):
             texts.append(label(f"{fmt_bytes(d.size)} · {d.name}", css=("dim-label", "caption")))
             box.append(icon)
             box.append(texts)
+            h = self.health_for(d)
+            if h is not None:
+                dot = Dot(hl.RATING_COLORS.get(h.rating, hl.RATING_COLORS[hl.UNKNOWN]), 9)
+                dot.set_tooltip_text(f"Gesamtzustand: {h.rating}")
+                box.append(dot)
             job = self.active_job_for(d)
             if d.is_protected:
-                box.append(Gtk.Image.new_from_icon_name("changes-prevent-symbolic"))
+                lock = Gtk.Image.new_from_icon_name("changes-prevent-symbolic")
+                lock.set_tooltip_text("Systemlaufwerk – geschützt")
+                box.append(lock)
             elif job:
                 ring = Ring(16, 2.5)
                 ring.update(job.fraction, COLORS["accent"])
                 box.append(ring)
                 self.disk_rings[d.name] = ring
             r.set_child(box)
-            self.disk_list.append(r)
+            (self.int_list if d.internal else self.ext_list).append(r)
             if self.selection == r.key:
-                self.disk_list.select_row(r)
+                (self.int_list if d.internal else self.ext_list).select_row(r)
         self.updating_lists = False
 
-    # --- Löschvorgänge in der Seitenleiste -----------------------------------------
+    # --- Vorgänge in der Seitenleiste -----------------------------------------------
 
     def rebuild_job_list(self):
         self.updating_lists = True
@@ -387,7 +649,7 @@ class MainWindow(Adw.ApplicationWindow):
             icon = Gtk.Image()
             icon.set_pixel_size(18)
             texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
-            t = label(j.disk.model)
+            t = label(f"{j.title} · {j.disk.model}" if j.kind != "wipe" else j.disk.model)
             t.set_ellipsize(Pango.EllipsizeMode.END)
             sub = label("", css=("dim-label", "caption"))
             texts.append(t)
@@ -417,8 +679,11 @@ class MainWindow(Adw.ApplicationWindow):
             else:
                 ring.set_visible(False)
                 icon.set_visible(True)
-                icon.set_from_icon_name({"done": "object-select-symbolic", "failed": "dialog-error-symbolic",
-                                         "cancelled": "process-stop-symbolic"}.get(j.state, "dialog-question-symbolic"))
+                name = {"done": "object-select-symbolic", "failed": "dialog-error-symbolic",
+                        "cancelled": "process-stop-symbolic"}.get(j.state, "dialog-question-symbolic")
+                if j.state == "done" and j.color == COLORS["failed"]:
+                    name = "dialog-warning-symbolic"
+                icon.set_from_icon_name(name)
 
     def update_sleep_status(self):
         active = any(j.active for j in self.jobs)
@@ -430,7 +695,7 @@ class MainWindow(Adw.ApplicationWindow):
     def select(self, key):
         self.selection = key
         self.updating_lists = True
-        for lst in (self.disk_list, self.job_list):
+        for lst in (self.ext_list, self.int_list, self.job_list):
             lst.unselect_all()
             i = 0
             while True:
@@ -441,12 +706,14 @@ class MainWindow(Adw.ApplicationWindow):
                     lst.select_row(r)
                 i += 1
         self.updating_lists = False
+        self.internal_confirm = False
         if key and key[0] == "disk":
             d = self.find_disk(key[1])
             if d:
+                rec = recommended_mode(d)
                 if d.is_ssd is True:
-                    self.mode_key = "ssd"
-                elif self.mode_key == "ssd":
+                    self.mode_key = rec
+                elif self.mode_key in ("ssd", "purge"):
                     self.mode_key = "secure"
 
     def on_row_selected(self, listbox, r):
@@ -468,15 +735,27 @@ class MainWindow(Adw.ApplicationWindow):
         elif self.selection and self.selection[0] == "disk":
             d = self.find_disk(self.selection[1])
             if d:
-                widget = self.build_disk_page(d)
                 self.content_page.set_title(d.model)
+                self.content_header.set_title_widget(self.switcher)
+                if self.stack.get_visible_child_name() != self.view:
+                    self.stack.set_visible_child_name(self.view)
+                if self.view == "diag":
+                    self.wipe_holder.set_child(None)
+                    self.diag_holder.set_child(self.build_diag_page(d))
+                else:
+                    self.diag_holder.set_child(None)
+                    self.wipe_holder.set_child(self.build_disk_page(d))
+                if self.content_view.get_content() is not self.stack:
+                    self.content_view.set_content(self.stack)
+                return
+        self.content_header.set_title_widget(None)
         if widget is None:
             self.content_page.set_title(APP_NAME)
             status = Adw.StatusPage()
             status.set_icon_name("wipekit-drive-symbolic")
             if self.disks:
                 status.set_title("Kein Laufwerk ausgewählt")
-                status.set_description("Wähle in der Seitenleiste das Laufwerk aus, das gelöscht werden soll.")
+                status.set_description("Wähle in der Seitenleiste ein Laufwerk aus.")
             else:
                 status.set_title("Kein Laufwerk angeschlossen")
                 status.set_description("Schließe ein Laufwerk per USB an. Es erscheint automatisch in der Seitenleiste.")
@@ -506,36 +785,58 @@ class MainWindow(Adw.ApplicationWindow):
         texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, spacing=4)
         t = label(title, css=("title-2",), wrap=True)
         texts.append(t)
-        texts.append(label(subtitle, css=("dim-label",)))
+        texts.append(label(subtitle, css=("dim-label",), wrap=True))
         hb.append(icon)
         hb.append(texts)
         g.add(hb)
         return g
 
-    # Laufwerk -----------------------------------------------------------------------
+    def disk_subtitle(self, d: Disk):
+        parts = [fmt_bytes(d.size), d.type_label, d.bus]
+        if d.internal:
+            parts.append("intern")
+        return " · ".join(parts)
+
+    # Laufwerk: Löschen -----------------------------------------------------------------
 
     def build_disk_page(self, d: Disk):
         page = Adw.PreferencesPage()
-        page.add(self.header_group(d.icon, d.model, f"{fmt_bytes(d.size)} · {d.type_label} · {d.bus}"))
+        page.add(self.header_group(d.icon, d.model, self.disk_subtitle(d)))
         bar_start, bar_end = [], []
         job = self.active_job_for(d)
 
-        if d.is_protected:
+        def note(text, icon, button=None):
             g = Adw.PreferencesGroup()
-            r = row("Auf diesem Laufwerk läuft das System. Es ist geschützt und kann nicht gelöscht werden.")
-            r.add_prefix(Gtk.Image.new_from_icon_name("changes-prevent-symbolic"))
+            r = row(text)
+            r.set_title_lines(0)
+            r.add_prefix(Gtk.Image.new_from_icon_name(icon))
+            if button:
+                r.add_suffix(button)
             g.add(r)
             page.add(g)
+
+        if d.is_protected or d.read_only:
+            btn = Gtk.Button(label="Zur Diagnose", valign=Gtk.Align.CENTER)
+            btn.connect("clicked", lambda *_: self.set_view("diag"))
+            note("Auf diesem Laufwerk läuft das System. Es ist geschützt und kann nicht gelöscht werden – "
+                 "die Diagnose ist aber möglich." if d.is_protected else
+                 "Dieses Laufwerk ist schreibgeschützt und kann nicht gelöscht werden.",
+                 "changes-prevent-symbolic", btn)
         elif job:
-            g = Adw.PreferencesGroup()
-            r = row("Dieses Laufwerk wird gerade gelöscht.")
             btn = Gtk.Button(label="Fortschritt anzeigen", valign=Gtk.Align.CENTER)
             btn.connect("clicked", lambda *_: (self.select(("job", job.id)), self.show_detail()))
-            r.add_suffix(btn)
-            g.add(r)
-            page.add(g)
+            note(f"Auf diesem Laufwerk läuft gerade: {job.title}.", "content-loading-symbolic", btn)
         else:
-            modes = Adw.PreferencesGroup(title="Löschmethode")
+            if d.internal:
+                note("Internes Laufwerk. Prüfe genau, ob es wirklich gelöscht werden soll – "
+                     "WipeKit fragt vor dem Start noch einmal nach.", "dialog-warning-symbolic")
+            h = self.health.get(d.name)
+            hpa = (h or {}).get("hpa") or {}
+            if hpa.get("enabled") and hpa.get("native", 0) > hpa.get("visible", 0):
+                note("Auf diesem Laufwerk ist ein versteckter Bereich (HPA) aktiv. Er wird beim Überschreiben "
+                     "nicht erreicht. Das Protokoll vermerkt das.", "dialog-warning-symbolic")
+
+            modes = Adw.PreferencesGroup(title="Methode")
             first_check = None
             rec = recommended_mode(d)
             for m in MODES:
@@ -545,13 +846,21 @@ class MainWindow(Adw.ApplicationWindow):
                     first_check = check
                 else:
                     check.set_group(first_check)
-                check.set_active(m.key == self.mode_key)
+                usable = not (m.purge and not d.direct_attached)
+                check.set_active(m.key == self.mode_key and usable)
                 check.connect("toggled", self.on_mode_toggled, m.key, d)
                 icon = Gtk.Image.new_from_icon_name(m.icon)
                 r.add_prefix(icon)
                 r.add_prefix(check)
+                if not usable:
+                    r.set_sensitive(False)
+                    r.set_subtitle("Nur bei direkt angeschlossenen SATA-/NVMe-Laufwerken")
                 if m.key == rec:
                     badge = label("Empfohlen", css=("accent", "caption-heading"))
+                    badge.set_valign(Gtk.Align.CENTER)
+                    r.add_suffix(badge)
+                if m.read_only:
+                    badge = label("Ändert nichts", css=("dim-label", "caption"))
                     badge.set_valign(Gtk.Align.CENTER)
                     r.add_suffix(badge)
                 r.set_activatable_widget(check)
@@ -561,36 +870,39 @@ class MainWindow(Adw.ApplicationWindow):
             self.mode_group = Adw.PreferencesGroup()
             self.mode_best = row("Geeignet für", "", prop=True)
             self.mode_security = row("Sicherheit")
-            self.mode_level = Gtk.LevelBar(min_value=0, max_value=4, valign=Gtk.Align.CENTER)
+            self.mode_level = Gtk.LevelBar(min_value=0, max_value=5, valign=Gtk.Align.CENTER)
             self.mode_level.set_mode(Gtk.LevelBarMode.DISCRETE)
-            self.mode_level.set_size_request(90, -1)
+            self.mode_level.set_size_request(100, -1)
             self.mode_security_label = label("")
             self.mode_security.add_suffix(self.mode_level)
             self.mode_security.add_suffix(self.mode_security_label)
+            self.mode_standard = row("Einordnung", "", prop=True)
             self.mode_duration = row("Geschätzte Dauer", "", prop=True)
             self.mode_note = label("", css=("dim-label", "caption"), wrap=True)
             self.mode_note.set_margin_top(10)
             self.mode_hint = label("", css=("warning", "caption"), wrap=True)
             self.mode_hint.set_margin_top(6)
-            for w in (self.mode_best, self.mode_security, self.mode_duration, self.mode_note, self.mode_hint):
+            for w in (self.mode_best, self.mode_security, self.mode_standard, self.mode_duration,
+                      self.mode_note, self.mode_hint):
                 self.mode_group.add(w)
             page.add(self.mode_group)
+
+            self.action_warn = label("", css=("dim-label",))
+            self.action_warn.set_ellipsize(Pango.EllipsizeMode.END)
+            self.action_btn = Gtk.Button(label="Löschen …")
+            self.action_btn.connect("clicked", lambda *_: self.confirm_start(d))
+            bar_start.append(self.action_warn)
+            bar_end.append(self.action_btn)
             self.update_mode_detail(d)
 
-            warn = label(f"Alle Daten auf »{d.model}« werden unwiderruflich gelöscht.", css=("dim-label",))
-            warn.set_ellipsize(Pango.EllipsizeMode.END)
-            btn = Gtk.Button(label="Löschen …")
-            btn.add_css_class("destructive-action")
-            btn.connect("clicked", lambda *_: self.confirm_wipe(d))
-            bar_start.append(warn)
-            bar_end.append(btn)
-
         info = Adw.PreferencesGroup(title="Informationen")
-        info.add(row("Gerät", d.path, prop=True))
-        info.add(row("Kapazität", f"{fmt_bytes(d.size)} ({fmt_exact_bytes(d.size)})", prop=True))
-        info.add(row("Anschluss", d.bus, prop=True))
-        info.add(row("Typ", d.type_label, prop=True))
-        info.add(row("Volumes", ", ".join(d.volumes) if d.volumes else "Keine", prop=True))
+        info.add(value_row("Gerät", d.path))
+        info.add(value_row("Kapazität", f"{fmt_bytes(d.size)} ({fmt_exact_bytes(d.size)})"))
+        info.add(value_row("Anschluss", d.bus + (" (intern)" if d.internal else "")))
+        info.add(value_row("Typ", d.type_label))
+        if d.serial:
+            info.add(value_row("Seriennummer", d.serial))
+        info.add(value_row("Volumes", ", ".join(d.volumes) if d.volumes else "Keine"))
         page.add(info)
         return self.with_action_bar(page, bar_start, bar_end)
 
@@ -606,26 +918,60 @@ class MainWindow(Adw.ApplicationWindow):
         self.mode_best.set_subtitle(m.best_for)
         self.mode_level.set_value(m.security_level)
         self.mode_security_label.set_label(m.security_label)
-        speed = 300e6 if d.is_ssd is True else 130e6
-        self.mode_duration.set_subtitle("ca. " + fmt_short_duration(d.size * m.work_units / speed))
+        self.mode_standard.set_subtitle(m.standard)
+        if m.purge:
+            self.mode_duration.set_subtitle("Meist Sekunden bis wenige Minuten – je nach Laufwerk")
+        else:
+            speed = 300e6 if d.is_ssd is True else 130e6
+            units = m.work_units + (0.02 if m.verify == "samples" else 0)
+            self.mode_duration.set_subtitle("ca. " + fmt_short_duration(d.size * units / speed))
         self.mode_note.set_label(m.security_note)
         hint = None
-        if d.is_ssd is True and m.key != "ssd":
-            hint = "Dieses Laufwerk ist eine SSD – dafür ist der Modus »SSD« besser geeignet."
+        if m.read_only:
+            hint = None
+        elif m.purge and d.is_ssd is False:
+            hint = "Bei Festplatten (HDD) kann die Firmware-Löschung Stunden dauern – »Sicher« ist meist schneller."
+        elif d.is_ssd is True and m.key not in ("ssd", "purge"):
+            hint = "Dieses Laufwerk ist eine SSD – dafür sind »SSD« oder »Firmware-Löschung« besser geeignet."
         elif d.is_ssd is False and m.key == "ssd":
             hint = "Dieses Laufwerk ist eine Festplatte – TRIM wird hier nicht unterstützt. »Sicher« ist die bessere Wahl."
-        elif d.is_ssd is None:
+        elif d.is_ssd is None and not m.purge:
             hint = "Der Laufwerkstyp wird vom USB-Adapter nicht gemeldet. Handelt es sich um eine SSD, wähle den Modus »SSD«."
         self.mode_hint.set_label("⚠ " + hint if hint else "")
         self.mode_hint.set_visible(hint is not None)
+        if getattr(self, "action_btn", None) is not None:
+            for c in ("destructive-action", "suggested-action"):
+                self.action_btn.remove_css_class(c)
+            if m.read_only:
+                self.action_btn.set_label("Prüfen …")
+                self.action_btn.add_css_class("suggested-action")
+                self.action_warn.set_label("Es werden keine Daten verändert.")
+            else:
+                self.action_btn.set_label("Löschen …")
+                self.action_btn.add_css_class("destructive-action")
+                self.action_warn.set_label(f"Alle Daten auf »{d.model}« werden unwiderruflich gelöscht.")
 
     # Bestätigen & starten --------------------------------------------------------------
 
-    def confirm_wipe(self, d: Disk):
+    def confirm_start(self, d: Disk):
         m = MODES_BY_KEY[self.mode_key]
+        if m.read_only:
+            self.ask(f"»{d.model}« prüfen?",
+                     f"WipeKit liest alle Sektoren von {d.path} ({fmt_bytes(d.size)}) und prüft, ob das Laufwerk "
+                     "leer ist. Es werden keine Daten verändert.",
+                     "Prüfung starten", lambda: self.start_job(d, m.key), destructive=False)
+            return
         heading = f"»{d.model}« löschen?"
         body = (f"Alle Daten auf {d.path} ({fmt_bytes(d.size)}) werden mit der Methode »{m.title}« "
                 "unwiderruflich gelöscht. Dieser Vorgang kann nicht rückgängig gemacht werden.")
+        if m.purge:
+            body += ("\n\nDas Laufwerk löscht sich dabei selbst. Rechner währenddessen nicht ausschalten und das "
+                     "Laufwerk nicht trennen.")
+        if d.internal:
+            body += (f"\n\nACHTUNG: »{d.model}« ist ein INTERNES Laufwerk dieses Rechners. Prüfe die "
+                     f"Seriennummer ({d.serial or 'nicht verfügbar'}) und die Größe genau.")
+            self.ask(heading, body, "Internes Laufwerk löschen", lambda: self.start_job(d, m.key, internal=True))
+            return
         self.ask(heading, body, "Löschen", lambda: self.start_job(d, m.key))
 
     def ask(self, heading, body, confirm_label, on_confirm, destructive=True):
@@ -637,7 +983,7 @@ class MainWindow(Adw.ApplicationWindow):
         dlg.add_response("ok", confirm_label)
         dlg.set_response_appearance("ok", Adw.ResponseAppearance.DESTRUCTIVE if destructive
                                     else Adw.ResponseAppearance.SUGGESTED)
-        dlg.set_default_response("cancel")
+        dlg.set_default_response("cancel" if destructive else "ok")
         dlg.set_close_response("cancel")
         dlg.connect("response", lambda _d, resp: on_confirm() if resp == "ok" else None)
         if hasattr(Adw, "AlertDialog"):
@@ -655,24 +1001,24 @@ class MainWindow(Adw.ApplicationWindow):
             dlg.add_response("ok", "OK")
             dlg.present()
 
-    def start_job(self, d: Disk, mode_key: str):
+    def start_job(self, d: Disk, mode_key: str, internal=False, purpose=""):
         if self.active_job_for(d):
             return
         job_id = uuid.uuid4().hex
         job_dir = BASE_DIR / job_id
-        info = {"id": job_id, "disk": asdict(d), "mode": mode_key, "createdAt": time.time()}
+        info = {"id": job_id, "disk": asdict(d), "mode": mode_key, "createdAt": time.time(), "purpose": purpose}
+        args = ["pkexec", str(HELPER), "--disk", d.name, "--mode", mode_key,
+                "--job-dir", str(job_dir), "--expected-size", str(d.size)]
+        if internal:
+            args.append("--internal-ok")
         try:
             job_dir.mkdir(mode=0o700)
             (job_dir / "job.json").write_text(json.dumps(info))
             log = open(job_dir / "pkexec.log", "w")
-            proc = subprocess.Popen(
-                ["pkexec", str(HELPER), "--disk", d.name, "--mode", mode_key,
-                 "--job-dir", str(job_dir), "--expected-size", str(d.size)],
-                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
-            )
+            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             log.close()
         except OSError as e:
-            self.inform("Löschvorgang konnte nicht gestartet werden", str(e))
+            self.inform("Vorgang konnte nicht gestartet werden", str(e))
             return
         job = Job(info, job_dir, proc)
         self.jobs.insert(0, job)
@@ -682,7 +1028,239 @@ class MainWindow(Adw.ApplicationWindow):
         self.show_detail()
         self.update_sleep_status()
 
-    # Löschvorgang -------------------------------------------------------------------------
+    # Laufwerk: Diagnose ----------------------------------------------------------------
+
+    def read_health(self):
+        if self.diag_state == "loading":
+            return
+        self.diag_state = "loading"
+        self.show_detail()
+        try:
+            proc = Gio.Subprocess.new(["pkexec", str(DIAG)],
+                                      Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+        except GLib.Error as e:
+            self.diag_state, self.diag_error = "error", e.message
+            self.show_detail()
+            return
+
+        def done(p, res):
+            try:
+                ok, out, err = p.communicate_utf8_finish(res)
+            except GLib.Error as e:
+                ok, out, err = False, "", e.message
+            code = p.get_exit_status() if p.get_if_exited() else -1
+            if code == 126:
+                self.diag_state = "idle"          # Passwortabfrage abgebrochen
+            elif code != 0 or not out:
+                self.diag_state = "error"
+                self.diag_error = (err or "").strip()[-300:] or f"Fehlercode {code}"
+            else:
+                self.apply_diag(out)
+            self.rebuild_disk_list()
+            self.show_detail()
+        proc.communicate_utf8_async(None, None, done)
+
+    def apply_diag(self, text):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            self.diag_state, self.diag_error = "error", "Ungültige Antwort des Diagnoseprozesses."
+            return
+        now = time.time()
+        for name, e in (data.get("disks") or {}).items():
+            h = hl.parse(e.get("smart") or {})
+            if d := self.find_disk(name):
+                if d.transport == "usb" and not h.available and not e.get("missing"):
+                    h.reason += " " + USB_HELP
+            self.health[name] = {"h": h, "hpa": e.get("hpa") or {}, "t": now}
+        self.diag_state = "done"
+
+    def build_diag_page(self, d: Disk):
+        entry = self.health.get(d.name)
+        if entry is None:
+            sp = Adw.StatusPage()
+            sp.set_icon_name("wipekit-pulse-symbolic")
+            if self.diag_state == "loading":
+                sp.set_title("Gesundheitsdaten werden gelesen …")
+                sp.set_description("Das dauert bei vielen Laufwerken ein paar Sekunden.")
+                spin = Gtk.Spinner(spinning=True, halign=Gtk.Align.CENTER)
+                spin.set_size_request(32, 32)
+                sp.set_child(spin)
+            else:
+                sp.set_title("Gesundheit prüfen")
+                desc = ("WipeKit liest die S.M.A.R.T.-Daten (Gesundheitsdaten) aller Laufwerke. "
+                        "Dafür ist einmal das Administrator-Passwort nötig. Es werden keine Daten verändert.")
+                if self.diag_state == "error":
+                    desc += f"\n\nLetzter Versuch fehlgeschlagen: {self.diag_error}"
+                sp.set_description(desc)
+                btn = Gtk.Button(label="Gesundheitsdaten lesen", halign=Gtk.Align.CENTER)
+                btn.add_css_class("pill")
+                btn.add_css_class("suggested-action")
+                btn.connect("clicked", lambda *_: self.read_health())
+                sp.set_child(btn)
+            return sp
+
+        h = entry["h"]
+        page = Adw.PreferencesPage()
+        page.add(self.header_group(d.icon, d.model, self.disk_subtitle(d)))
+
+        # Übersicht: drei Kacheln
+        g = Adw.PreferencesGroup()
+        tiles = Gtk.Box(spacing=12, homogeneous=True)
+
+        def tile(caption, value, css, sub=""):
+            b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            b.add_css_class("card")
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_top=14, margin_bottom=14,
+                            margin_start=16, margin_end=16)
+            inner.append(label(caption, css=("caption-heading", "dim-label")))
+            v = label(value, css=("title-1", css) if css else ("title-1",))
+            inner.append(v)
+            if sub:
+                s = label(sub, css=("caption", "dim-label"), wrap=True)
+                inner.append(s)
+            b.append(inner)
+            return b
+        tiles.append(tile("GESAMTZUSTAND", h.rating, RATING_CSS.get(h.rating)))
+        if h.is_ssd:
+            tiles.append(tile("RESTLEBENSDAUER", f"{h.life_percent} %" if h.life_percent is not None else "–",
+                              None, "laut Laufwerk"))
+        else:
+            tiles.append(tile("BETRIEBSSTUNDEN", hl.fmt_count(h.power_on_hours) if h.power_on_hours is not None
+                              else "–", None, "Stunden eingeschaltet"))
+        tiles.append(tile("TEMPERATUR", hl.fmt_temp(h.temperature), None, "aktuell"))
+        g.add(tiles)
+        page.add(g)
+
+        bar_start, bar_end = [], []
+        job = self.active_job_for(d)
+        if not h.available:
+            ng = Adw.PreferencesGroup(title="Keine Gesundheitsdaten")
+            ng.set_description(h.reason or "Für dieses Laufwerk sind keine Daten verfügbar.")
+            page.add(ng)
+        else:
+            rg = Adw.PreferencesGroup(title="Bewertung")
+            for reason in h.reasons:
+                r = row(reason)
+                r.set_title_lines(0)
+                icon = "object-select-symbolic" if h.rating == hl.VERY_GOOD else "dialog-information-symbolic"
+                if h.rating in (hl.CAUTION, hl.BAD):
+                    icon = "dialog-warning-symbolic"
+                img = Gtk.Image.new_from_icon_name(icon)
+                img.add_css_class(RATING_CSS.get(h.rating, "dim-label"))
+                r.add_prefix(img)
+                rg.add(r)
+            page.add(rg)
+
+            kg = Adw.PreferencesGroup(title="Kennwerte")
+            for k, v in hl.key_values(h)[1:]:
+                css = None
+                if k.startswith(("Ausstehende", "Unkorrigierbare")) and v not in ("0", "–") and not v.startswith("–"):
+                    css = "error" if k.startswith("Unkorrigierbare") else "warning"
+                kg.add(value_row(k, v, css))
+            page.add(kg)
+
+        # Tests
+        tg = Adw.PreferencesGroup(title="Tests")
+        tg.set_description("Selbsttests führt das Laufwerk selbst aus. Der Oberflächentest liest jeden Sektor. "
+                           "Keiner der Tests verändert Daten.")
+        tests = []
+        if h.available and h.supports_self_tests:
+            tests.append(("selftest-short", "Kurztest",
+                          f"Elektronik und Teile der Oberfläche · ca. {h.short_minutes or 2} Min."))
+            tests.append(("selftest-long", "Langtest",
+                          f"Gesamte Oberfläche durch das Laufwerk · ca. {self.fmt_minutes(h.long_minutes)}"))
+            if h.supports_conveyance:
+                tests.append(("selftest-conveyance", "Transporttest", "Transportschäden erkennen · ca. 2 Min."))
+        tests.append(("scan", "Oberflächentest",
+                      f"WipeKit liest jeden Sektor und misst die Geschwindigkeit · ca. "
+                      f"{fmt_short_duration(d.size / (400e6 if d.is_ssd else 130e6))}"))
+        for key, title, sub in tests:
+            r = row(title, sub)
+            b = Gtk.Button(label="Starten", valign=Gtk.Align.CENTER)
+            b.set_sensitive(job is None)
+            if job is not None:
+                b.set_tooltip_text("Auf diesem Laufwerk läuft bereits ein Vorgang.")
+            if key == "scan":
+                b.connect("clicked", lambda *_: self.start_job(d, "check", purpose="scan"))
+            else:
+                b.connect("clicked", lambda _b, k=key: self.start_job(d, k))
+            r.add_suffix(b)
+            tg.add(r)
+        page.add(tg)
+
+        if h.available:
+            dg = Adw.PreferencesGroup(title="Laufwerk")
+            for k, v in hl.drive_details(h):
+                dg.add(value_row(k, v))
+            hpa = entry.get("hpa") or {}
+            if hpa:
+                txt = ("aktiv – " + fmt_bytes((hpa["native"] - hpa["visible"]) * 512) + " versteckt"
+                       if hpa.get("enabled") and hpa["native"] > hpa["visible"] else "nicht aktiv")
+                dg.add(value_row("Versteckter Bereich (HPA)", txt, "warning" if txt.startswith("aktiv") else None))
+            page.add(dg)
+
+            if h.attributes:
+                ag = Adw.PreferencesGroup(title="S.M.A.R.T.-Attribute")
+                ex = Adw.ExpanderRow(title=f"{len(h.attributes)} Attribute anzeigen")
+                warn = sum(1 for a in h.attributes if a.status != "OK")
+                ex.set_subtitle("alle unauffällig" if not warn else f"{warn} auffällig")
+                for a in h.attributes:
+                    r = row(f"{a.id:>3} · {a.name}",
+                            f"Wert {a.value} · Schlechtester {a.worst} · Grenzwert {a.thresh} · Rohwert {a.raw_string}")
+                    st = label(a.status, css=({"OK": "dim-label", "Warnung": "warning", "Fehler": "error"}[a.status],))
+                    st.set_valign(Gtk.Align.CENTER)
+                    r.add_suffix(st)
+                    ex.add_row(r)
+                ex.set_expanded(warn > 0)
+                ag.add(ex)
+                page.add(ag)
+            if h.nvme:
+                ng = Adw.PreferencesGroup(title="NVMe-Gesundheitswerte")
+                ex = Adw.ExpanderRow(title="Alle Werte anzeigen")
+                for key, lab in hl.NVME_LABELS:
+                    if key in h.nvme:
+                        v = h.nvme[key]
+                        ex.add_row(value_row(lab, hl.fmt_count(v) if isinstance(v, int) else str(v)))
+                ng.add(ex)
+                page.add(ng)
+            if h.self_tests:
+                sg = Adw.PreferencesGroup(title="Selbsttest-Protokoll des Laufwerks")
+                for t in h.self_tests[:8]:
+                    r = row(t.kind, t.result)
+                    r.add_suffix(label(f"Std. {hl.fmt_count(t.hours)}" if t.hours is not None else "",
+                                       css=("dim-label", "numeric")))
+                    sg.add(r)
+                page.add(sg)
+
+        bar_start.append(label(f"Gelesen {fmt_clock(entry['t'])}", css=("dim-label",)))
+        upd = Gtk.Button(label="Aktualisieren")
+        upd.connect("clicked", lambda *_: self.read_health())
+        save = Gtk.Button(label="Bericht speichern")
+        save.add_css_class("suggested-action")
+        save.connect("clicked", lambda *_: self.save_health_report(d))
+        bar_end += [save, upd]
+        return self.with_action_bar(page, bar_start, bar_end)
+
+    @staticmethod
+    def fmt_minutes(m):
+        if not m:
+            return "1–2 Std."
+        return fmt_short_duration(m * 60)
+
+    def save_health_report(self, d: Disk):
+        entry = self.health.get(d.name)
+        h = entry["h"] if entry else None
+        ident = rp.identity_from(h, d.model, d.size, d.serial)
+        r = rp.health_report(h, ident, VERSION, os_label(), socket.gethostname())
+        try:
+            pdf, txt = rp.save(r, reports_folder())
+        except OSError as e:
+            self.inform("Bericht konnte nicht gespeichert werden", str(e))
+            return
+        self.toast(f"Gesundheitsbericht gespeichert: {pdf.name}", "Öffnen", lambda: open_path(pdf))
+
+    # Vorgang ------------------------------------------------------------------------------
 
     def build_job_page(self, j: Job):
         page = Adw.PreferencesPage()
@@ -706,17 +1284,42 @@ class MainWindow(Adw.ApplicationWindow):
         overlay.add_overlay(center)
         headline = label("", css=("title-2",), xalign=0.5)
         subline = label("", css=("dim-label",), xalign=0.5, wrap=True)
+        subline.set_justify(Gtk.Justification.CENTER)
         for w in (overlay, headline, subline):
             box.append(w)
         hero.add(box)
         page.add(hero)
         refs.update(ring=ring, pct=pct, step=step, headline=headline, subline=subline, result_icon=result_icon)
 
+        if j.kind == "check":
+            cg = Adw.PreferencesGroup(title="Lesegeschwindigkeit")
+            curve = Curve()
+            frame = Gtk.Box(margin_top=6, margin_bottom=6)
+            frame.add_css_class("card")
+            curve.set_margin_top(10)
+            curve.set_margin_bottom(6)
+            curve.set_margin_start(6)
+            curve.set_margin_end(10)
+            frame.append(curve)
+            cg.add(frame)
+            page.add(cg)
+            refs["curve"] = curve
+            fg = Adw.PreferencesGroup(title="Befund")
+            refs["r_bad"] = value_row("Unlesbare Bereiche", "–")
+            refs["r_data"] = value_row("Daten gefunden", "–")
+            fg.add(refs["r_bad"])
+            fg.add(refs["r_data"])
+            page.add(fg)
+
         bar_start, bar_end = [], []
         if j.active:
             prog = Adw.PreferencesGroup(title="Fortschritt")
-            for key, title in (("r_step", "Schritt"), ("r_done", "Verarbeitet"), ("r_speed", "Geschwindigkeit"),
-                               ("r_eta", "Verbleibend"), ("r_end", "Voraussichtlich fertig"), ("r_elapsed", "Läuft seit")):
+            keys = [("r_step", "Schritt")]
+            if j.kind != "selftest" and not j.mode.purge:
+                keys += [("r_done", "Verarbeitet"), ("r_speed", "Geschwindigkeit"), ("r_eta", "Verbleibend"),
+                         ("r_end", "Voraussichtlich fertig")]
+            keys.append(("r_elapsed", "Läuft seit"))
+            for key, title in keys:
                 r = row(title, "–", prop=True)
                 prog.add(r)
                 refs[key] = r
@@ -728,58 +1331,93 @@ class MainWindow(Adw.ApplicationWindow):
             refs["r_sleep"] = r
             page.add(sleep)
 
-            hint = label("Du kannst WipeKit schließen – das Löschen läuft im Hintergrund weiter.", css=("dim-label",))
+            hint = label("Du kannst WipeKit schließen – der Vorgang läuft im Hintergrund weiter.", css=("dim-label",))
             hint.set_ellipsize(Pango.EllipsizeMode.END)
             bar_start.append(hint)
             cancel = Gtk.Button(label="Abbrechen …")
+            body = ("Das Laufwerk ist danach nur teilweise überschrieben." if j.kind == "wipe"
+                    else "Der Vorgang wird beendet. Es werden keine Daten verändert.")
             cancel.connect("clicked", lambda *_: self.ask(
-                "Löschvorgang abbrechen?", "Das Laufwerk ist danach nur teilweise überschrieben.",
-                "Löschvorgang abbrechen", lambda: (j.request_cancel(), self.update_job_page())))
+                f"{j.title} abbrechen?", body, "Abbrechen bestätigen",
+                lambda: (j.request_cancel(), self.update_job_page())))
+            if j.mode.purge:
+                cancel.set_sensitive(False)
+                cancel.set_tooltip_text("Eine laufende Firmware-Löschung kann nicht abgebrochen werden.")
             bar_end.append(cancel)
             refs["cancel"] = cancel
         else:
             res = Adw.PreferencesGroup(title="Ergebnis")
             res.set_description(("⚠ " if j.state == "failed" else "") + (j.message or "–"))
+            s = j.status
             if j.elapsed is not None:
-                res.add(row("Dauer", fmt_duration(j.elapsed), prop=True))
-            if j.mode.verifies:
-                v = j.status.verified if j.status else None
-                res.add(row("Prüfung", {True: "Bestanden", False: "Nicht bestanden"}.get(v, "Nicht durchgeführt"), prop=True))
-            if j.mode.trims:
-                res.add(row("TRIM", (j.status.trimResult if j.status else None) or "Nicht durchgeführt", prop=True))
-            if j.status and j.status.finishedAt:
-                res.add(row("Beendet", fmt_datetime(j.status.finishedAt), prop=True))
+                res.add(value_row("Dauer", fmt_duration(j.elapsed)))
+            if j.kind == "wipe":
+                if j.mode.verify == "full":
+                    v = s.verified if s else None
+                    res.add(value_row("Prüfung", {True: "Bestanden", False: "Nicht bestanden"}.get(v, "Nicht durchgeführt")))
+                if s and s.sampleResult:
+                    res.add(value_row("Stichproben" if not j.mode.purge else "Prüfmarken", s.sampleResult))
+                if s and s.purgeMethod:
+                    res.add(value_row("Firmware-Befehl", s.purgeMethod))
+                if j.mode.trims:
+                    res.add(value_row("TRIM", (s.trimResult if s else None) or "Nicht durchgeführt"))
+                if s and s.hiddenArea:
+                    res.add(value_row("Versteckte Bereiche", s.hiddenArea))
+            if s and s.finishedAt:
+                res.add(value_row("Beendet", fmt_datetime(s.finishedAt)))
             page.add(res)
 
             remove = Gtk.Button(label="Entfernen")
             remove.connect("clicked", lambda *_: self.remove_job(j))
             bar_end.append(remove)
-            if j.protocol:
-                pg = Adw.PreferencesGroup(title="Protokoll")
-                r = row(j.protocol.name)
-                ob = Gtk.Button(label="Öffnen", valign=Gtk.Align.CENTER)
-                ob.connect("clicked", lambda *_: open_path(j.protocol))
-                fb = Gtk.Button(label="Ordner öffnen", valign=Gtk.Align.CENTER)
-                fb.connect("clicked", lambda *_: open_path(j.protocol.parent))
-                r.add_suffix(ob)
-                r.add_suffix(fb)
-                pg.add(r)
+            if j.reports.get("pdf"):
+                pg = Adw.PreferencesGroup(title="Protokolle")
+                pg.set_description(f"Gespeichert in {reports_folder()} (Unterordner »PDF« und »Text«).")
+                items = [("pdf", j.reports.get("title", "Protokoll")), ("pdf_full", "Ausführliches Protokoll")]
+                for key, title in items:
+                    p = j.reports.get(key)
+                    if not p:
+                        continue
+                    r = row(title, Path(p).name)
+                    r.set_subtitle_lines(1)
+                    ob = Gtk.Button(label="PDF öffnen", valign=Gtk.Align.CENTER)
+                    ob.connect("clicked", lambda _b, p=p: open_path(Path(p)))
+                    tb = Gtk.Button(label="Text", valign=Gtk.Align.CENTER)
+                    tb.connect("clicked", lambda _b, p=j.reports.get(key.replace("pdf", "txt")): open_path(Path(p)))
+                    r.add_suffix(ob)
+                    r.add_suffix(tb)
+                    pg.add(r)
                 page.add(pg)
+                fb = Gtk.Button(label="Ordner öffnen")
+                fb.connect("clicked", lambda *_: self.on_open_reports())
+                bar_start.append(fb)
                 op = Gtk.Button(label="Protokoll öffnen")
                 op.add_css_class("suggested-action")
                 op.connect("clicked", lambda *_: open_path(j.protocol))
                 bar_end.insert(0, op)
+            elif j.kind == "selftest":
+                db = Gtk.Button(label="Zur Diagnose")
+                db.add_css_class("suggested-action")
+                db.connect("clicked", lambda *_: self.go_to_diag(j.disk.name))
+                bar_end.insert(0, db)
 
         info = Adw.PreferencesGroup(title="Laufwerk")
-        info.add(row("Name", j.disk.model, prop=True))
-        info.add(row("Gerät", j.disk.path, prop=True))
-        info.add(row("Kapazität", fmt_bytes(j.disk.size), prop=True))
-        info.add(row("Methode", f"{j.mode.title} · {j.mode.tagline}", prop=True))
+        info.add(value_row("Name", j.disk.model))
+        info.add(value_row("Gerät", j.disk.path))
+        info.add(value_row("Kapazität", fmt_bytes(j.disk.size)))
+        info.add(value_row("Vorgang", f"{j.title if j.kind != 'wipe' else j.mode.title} · {j.mode.tagline}"))
         page.add(info)
 
         self.job_page_refs = refs
         self.update_job_page()
         return self.with_action_bar(page, bar_start, bar_end)
+
+    def go_to_diag(self, name):
+        if self.find_disk(name):
+            self.select(("disk", name))
+            self.view = "diag"
+            self.stack.set_visible_child_name("diag")
+            self.show_detail()
 
     def update_job_page(self):
         refs = self.job_page_refs
@@ -793,36 +1431,52 @@ class MainWindow(Adw.ApplicationWindow):
             refs["pct"].set_visible(True)
             icon.set_visible(False)
             refs["pct"].set_label(fmt_percent(j.fraction))
-            refs["step"].set_label(f"Schritt {s.step} von {s.stepCount}" if s and s.state == "running" else "")
+            refs["step"].set_label(f"Schritt {s.step} von {s.stepCount}" if s and s.state == "running"
+                                   and s.stepCount > 1 else "")
         else:
             refs["pct"].set_visible(False)
             icon.set_visible(True)
-            icon.set_from_icon_name({"done": "object-select-symbolic", "failed": "window-close-symbolic"}.get(
+            bad = j.state == "done" and j.color == COLORS["failed"]
+            icon.set_from_icon_name("dialog-warning-symbolic" if bad else {
+                "done": "object-select-symbolic", "failed": "window-close-symbolic"}.get(
                 j.state, "media-playback-stop-symbolic"))
             for c in ("success", "error", "warning"):
                 icon.remove_css_class(c)
-            icon.add_css_class({"done": "success", "failed": "error"}.get(j.state, "warning"))
+            icon.add_css_class("error" if bad else {"done": "success", "failed": "error"}.get(j.state, "warning"))
             refs["step"].set_label("")
-        refs["headline"].set_label({"starting": "Wird vorbereitet", "running": "Wird gelöscht",
-                                    "done": "Löschen abgeschlossen", "failed": "Löschen fehlgeschlagen",
-                                    "cancelled": "Löschen abgebrochen"}[j.state])
+        running = {"wipe": "Wird gelöscht", "check": f"{j.title} läuft", "selftest": f"{j.title} läuft"}[j.kind]
+        done = {"wipe": "Löschen abgeschlossen", "check": f"{j.title} abgeschlossen",
+                "selftest": f"{j.title} abgeschlossen"}[j.kind]
+        refs["headline"].set_label({"starting": "Wird vorbereitet", "running": running, "done": done,
+                                    "failed": f"{j.title} fehlgeschlagen",
+                                    "cancelled": f"{j.title} abgebrochen"}[j.state])
         if j.state == "starting":
             refs["subline"].set_label(s.phase if s else "Bitte das Administrator-Passwort eingeben.")
         elif j.state == "running":
             refs["subline"].set_label(s.phase if s else "")
         elif j.state == "done":
-            refs["subline"].set_label(f"»{j.disk.model}« wurde sicher gelöscht.")
+            refs["subline"].set_label(f"»{j.disk.model}« wurde sicher gelöscht." if j.kind == "wipe"
+                                      else (j.message or j.disk.model))
         else:
             refs["subline"].set_label(j.disk.model)
 
+        if "curve" in refs and s is not None:
+            refs["curve"].update(s.curve or [], curve_total(s.diskSize or j.disk.size))
+            self._set_value(refs["r_bad"], "keine" if not s.badBlocks else f"{s.badBlocks} (je 64 KiB)",
+                            "error" if s.badBlocks else None)
+            if s.nonZeroBytes is not None:
+                self._set_value(refs["r_data"], "keine – nur Nullen" if s.nonZeroBytes == 0 else
+                                f"{fmt_bytes(s.nonZeroBytes)} enthalten Daten")
+
         if j.active and "r_step" in refs:
             if s and s.state == "running":
-                refs["r_step"].set_subtitle(f"{s.step} von {s.stepCount} · {s.phase}")
-                refs["r_done"].set_subtitle(f"{fmt_bytes(s.bytesDoneTotal)} von {fmt_bytes(s.bytesTotal)}")
-                refs["r_speed"].set_subtitle(fmt_speed(s.speed) if s.speed > 0 else "–")
-                eta = j.eta
-                refs["r_eta"].set_subtitle(f"ca. {fmt_duration(eta)}" if eta else "Wird berechnet …")
-                refs["r_end"].set_subtitle(fmt_clock(time.time() + eta) if eta else "–")
+                refs["r_step"].set_subtitle(f"{s.step} von {s.stepCount} · {s.phase}" if s.stepCount > 1 else s.phase)
+                if "r_done" in refs:
+                    refs["r_done"].set_subtitle(f"{fmt_bytes(s.bytesDoneTotal)} von {fmt_bytes(s.bytesTotal)}")
+                    refs["r_speed"].set_subtitle(fmt_speed(s.speed) if s.speed > 0 else "–")
+                    eta = j.eta
+                    refs["r_eta"].set_subtitle(f"ca. {fmt_duration(eta)}" if eta else "Wird berechnet …")
+                    refs["r_end"].set_subtitle(fmt_clock(time.time() + eta) if eta else "–")
                 refs["r_elapsed"].set_subtitle(fmt_duration(j.elapsed) if j.elapsed else "–")
             else:
                 refs["r_step"].set_subtitle(s.phase if s else "Warte auf Administrator-Passwort …")
@@ -831,8 +1485,18 @@ class MainWindow(Adw.ApplicationWindow):
             if j.cancel_requested:
                 refs["cancel"].set_label("Wird abgebrochen …")
                 refs["cancel"].set_sensitive(False)
-            else:
+            elif not j.mode.purge:
                 refs["cancel"].set_sensitive(s is not None)
+
+    @staticmethod
+    def _set_value(r, text, css=None):
+        lab = getattr(r, "value_label", None)
+        if lab is None:
+            return
+        lab.set_label(text)
+        for c in ("error", "warning", "dim-label"):
+            lab.remove_css_class(c)
+        lab.add_css_class(css or "dim-label")
 
     # --- Zyklus ---------------------------------------------------------------------------
 
@@ -905,34 +1569,42 @@ class MainWindow(Adw.ApplicationWindow):
             self.select(("job", running.id))
             self.show_detail()
 
-    # --- Abschluss & Protokoll -----------------------------------------------------------
+    # --- Abschluss & Protokolle -----------------------------------------------------------
 
     def job_finished(self, j: Job, notify=True):
         if j.reported:
             return
         j.reported = True
-        path = self.write_protocol(j)
-        if path:
-            j.protocol = path
+        after = load_health(j.dir / "smart-after.json")
+        if after is not None and after.available:
+            prev = self.health.get(j.disk.name) or {}
+            self.health[j.disk.name] = {"h": after, "hpa": prev.get("hpa") or {}, "t": time.time()}
+        if j.kind != "selftest":
             try:
-                (j.dir / "protocol_path").write_text(str(path))
-            except OSError:
-                pass
+                j.reports = self.write_reports(j)
+            except Exception as e:  # Protokoll darf den Ablauf nie stören
+                j.reports = {"error": str(e)}
+        try:
+            (j.dir / "reports.json").write_text(json.dumps(j.reports))
+        except OSError:
+            pass
         d = j.disk
         if j.state == "done":
-            title = "Löschen abgeschlossen"
-            text = f"{d.model} ({d.path}, {fmt_bytes(d.size)}) wurde erfolgreich gelöscht."
+            title = {"wipe": "Löschen abgeschlossen"}.get(j.kind, f"{j.title} abgeschlossen")
+            text = (f"{d.model} ({d.path}, {fmt_bytes(d.size)}) wurde erfolgreich gelöscht." if j.kind == "wipe"
+                    else f"{d.model}: {j.message or j.done_text}")
             if j.elapsed:
                 text += f"\nDauer: {fmt_duration(j.elapsed)}"
-            if j.status and j.status.verified:
-                text += "\nPrüfung: bestanden – jeder Sektor ist überschrieben."
+            if j.kind == "wipe" and j.status and j.status.verified:
+                text += ("\nPrüfung: bestanden – jeder Sektor ist überschrieben." if j.mode.verify == "full"
+                         else f"\nKontrolle: {j.status.sampleResult}")
             if j.mode.trims and j.status and j.status.trimResult:
                 text += f"\nTRIM: {j.status.trimResult}"
         elif j.state == "cancelled":
-            title = "Löschvorgang abgebrochen"
+            title = f"{j.title} abgebrochen"
             text = f"{d.model} ({d.path}): {j.message or ''}"
         else:
-            title = "Löschen fehlgeschlagen"
+            title = f"{j.title} fehlgeschlagen"
             text = f"{d.model} ({d.path}): {j.message or 'Unbekannter Fehler'}"
         if notify:
             n = Gio.Notification.new(title)
@@ -940,67 +1612,58 @@ class MainWindow(Adw.ApplicationWindow):
             self.app.send_notification(j.id, n)
             self.inform(title, text)
 
-    def write_protocol(self, j: Job):
-        folder = protocol_folder()
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return None
+    def write_reports(self, j: Job) -> dict:
         d, s = j.disk, j.status
+        before = load_health(j.dir / "smart-before.json")
+        after = load_health(j.dir / "smart-after.json")
         started = s.startedAt if s and s.startedAt else j.info["createdAt"]
         ended = s.finishedAt if s and s.finishedAt else time.time()
-        duration = max(0, ended - started)
-        safe = "".join(c if c not in '/\\:' else "-" for c in d.model)
-        path = folder / f"{time.strftime('%Y-%m-%d_%H-%M', time.localtime(started))}_{d.name}_{safe}.txt"
-        result = {"done": "ERFOLGREICH", "cancelled": "ABGEBROCHEN – Laufwerk nur teilweise überschrieben"}.get(
-            j.state, "FEHLGESCHLAGEN")
-        verification = "nicht vorgesehen (Modus »Schnell«)"
-        if j.mode.verifies:
+        verification = "nicht vorgesehen"
+        if j.mode.verify == "full":
             v = s.verified if s else None
             if v is True:
                 verification = ("bestanden – alle Sektoren gelesen und mit den geschriebenen Zufallsdaten verglichen"
-                                if j.mode.passes[-1] == SEEDED else "bestanden – alle Sektoren gelesen, alle enthalten Nullen")
+                                if j.mode.passes and j.mode.passes[-1] == "seeded"
+                                else "bestanden – alle Sektoren gelesen, alle enthalten Nullen")
             elif v is False:
                 verification = "NICHT bestanden"
             else:
                 verification = "nicht durchgeführt"
-        trim = ((s.trimResult if s else None) or "nicht durchgeführt") if j.mode.trims else "nicht vorgesehen"
-        written = s.bytesDoneTotal if s else 0
-        avg = written / duration if duration > 0 else 0
-        text = f"""WIPEKIT – LÖSCHPROTOKOLL
-========================
-
-Laufwerk:          {d.model}
-Kennung:           {d.path}
-Kapazität:         {fmt_bytes(d.size)} ({fmt_exact_bytes(s.diskSize if s and s.diskSize else d.size)})
-Anschluss:         {d.bus}
-Typ:               {d.type_label}
-Frühere Volumes:   {", ".join(d.volumes) if d.volumes else "–"}
-
-Methode:           {j.mode.title} – {j.mode.method_description}
-Beginn:            {fmt_datetime(started)}
-Ende:              {fmt_datetime(ended)}
-Dauer:             {fmt_duration(duration)}
-Ø Geschwindigkeit: {fmt_speed(avg)}
-
-Ergebnis:          {result}
-Verifikation:      {verification}
-TRIM:              {trim}
-Meldung:           {j.message or "–"}
-
-Rechner:           {socket.gethostname()}
-Erstellt mit WipeKit {VERSION} (Linux)
-"""
-        try:
-            path.write_text(text, encoding="utf-8")
-            return path
-        except OSError:
-            return None
+        elif j.mode.verify == "samples":
+            verification = (s.sampleResult if s and s.sampleResult else "nicht durchgeführt")
+        w = rp.WipeInfo(
+            mode_title=j.title if j.kind == "check" else j.mode.title, method=j.mode.method_description,
+            standard=j.mode.standard, state=j.state, started=started, ended=ended,
+            bytes_written=(s.bytesDoneTotal if s else 0) if not j.mode.purge else 0,
+            message=j.message or "", verification=verification,
+            trim=((s.trimResult if s else None) or "nicht durchgeführt") if j.mode.trims else "",
+            device=d.path, bus=d.bus + (" (intern)" if d.internal else ""), type_label=d.type_label,
+            volumes=d.volumes, exact_size=(s.diskSize if s and s.diskSize else d.size),
+            hidden_area=(s.hiddenArea if s and s.hiddenArea else ""), host=socket.gethostname(),
+            platform=os_label(), app_version=VERSION, read_only=j.mode.read_only,
+            bad_blocks=(s.badBlocks if s else None) if j.mode.read_only else None,
+            non_zero=(s.nonZeroBytes if s else None) if j.mode.read_only else None,
+            purge_method=(s.purgeMethod if s and s.purgeMethod else ""))
+        ident = rp.identity_from(before or after, d.model, d.size, d.serial)
+        folder = reports_folder()
+        out = {}
+        if j.mode.read_only:
+            r = rp.wipe_report(w, ident, before, after, detailed=True)
+            pdf, txt = rp.save(r, folder)
+            out.update(pdf=str(pdf), txt=str(txt), title="Prüfprotokoll")
+        else:
+            r = rp.wipe_report(w, ident, before, after, detailed=False)
+            pdf, txt = rp.save(r, folder)
+            out.update(pdf=str(pdf), txt=str(txt), title="Löschprotokoll")
+            r = rp.wipe_report(w, ident, before, after, detailed=True)
+            pdf, txt = rp.save(r, folder)
+            out.update(pdf_full=str(pdf), txt_full=str(txt))
+        return out
 
     # --- Sonstiges ---------------------------------------------------------------------------
 
-    def on_open_protocols(self, *_):
-        folder = protocol_folder()
+    def on_open_reports(self, *_):
+        folder = reports_folder()
         folder.mkdir(parents=True, exist_ok=True)
         open_path(folder)
 
@@ -1013,8 +1676,8 @@ Erstellt mit WipeKit {VERSION} (Linux)
             self.force_close = True
             self.close()
 
-        self.ask("Ein Löschvorgang läuft noch" if active == 1 else f"{active} Löschvorgänge laufen noch",
-                 "Das Löschen wird im Hintergrund fortgesetzt und der Rechner bleibt wach. "
+        self.ask("Ein Vorgang läuft noch" if active == 1 else f"{active} Vorgänge laufen noch",
+                 "Der Vorgang wird im Hintergrund fortgesetzt und der Rechner bleibt wach. "
                  "Öffne WipeKit erneut, um den Fortschritt zu sehen.", "Beenden", really_close, destructive=False)
         return True
 
@@ -1029,6 +1692,33 @@ class WipeKitApp(Adw.Application):
         self.window = None
         self.smoke_test = smoke_test
         self.smoke_ok = False
+        about = Gio.SimpleAction.new("about", None)
+        about.connect("activate", lambda *_: self.show_about())
+        self.add_action(about)
+
+    def show_about(self):
+        kw = dict(application_name=APP_NAME, application_icon=APP_ID, version=VERSION,
+                  developer_name="mllsm66", license_type=Gtk.License.MIT_X11,
+                  website="https://github.com/mllsm66/WipeKit",
+                  comments="Laufwerke sicher löschen und ihre Gesundheit prüfen.")
+        if hasattr(Adw, "AboutDialog"):
+            dlg = Adw.AboutDialog(**kw)
+        else:
+            dlg = Adw.AboutWindow(transient_for=self.window, **kw)
+        dlg.add_legal_section(
+            "smartmontools", "Copyright © 2002–2025 Bruce Allen, Christian Franke u. a. – "
+            "wird als eigenständiges Programm aufgerufen (Paket »smartmontools«).", Gtk.License.GPL_2_0, None)
+        dlg.add_legal_section("hdparm", "Copyright © Mark Lord – eigenständiges Programm (Paket »hdparm«).",
+                              Gtk.License.CUSTOM, "BSD-artige Lizenz des hdparm-Projekts.")
+        dlg.add_legal_section("nvme-cli", "Copyright © nvme-cli-Projekt – eigenständiges Programm (Paket »nvme-cli«).",
+                              Gtk.License.GPL_2_0, None)
+        dlg.add_legal_section("Helvetica-Zeichenbreiten (PDF)", "Copyright © 1985–1997 Adobe Systems Incorporated. "
+                              "Metrikdaten aus den Adobe Core-14-AFM-Dateien.", Gtk.License.CUSTOM,
+                              "Frei verwendbar laut Adobe-Lizenzhinweis zu den AFM-Dateien.")
+        if hasattr(Adw, "AboutDialog"):
+            dlg.present(self.window)
+        else:
+            dlg.present()
 
     def do_activate(self):
         display = Gdk.Display.get_default()
@@ -1046,6 +1736,7 @@ class WipeKitApp(Adw.Application):
         import traceback
         w = self.window
         shots = os.environ.get("WIPEKIT_SHOTS")
+        fixtures = Path(os.environ.get("WIPEKIT_FIXTURES", HERE.parent.parent / "tests" / "fixtures"))
 
         def settle():
             ctx = GLib.MainContext.default()
@@ -1075,34 +1766,88 @@ class WipeKitApp(Adw.Application):
 
         try:
             w.disks = [
-                Disk("sdx", "/dev/sdx", "Test SSD", 500_000_000_000, "USB", True, ["Daten"], [], [], False),
-                Disk("sdy", "/dev/sdy", "Test HDD", 2_000_000_000_000, "USB", False, [], [], [], False),
-                Disk("sdz", "/dev/sdz", "Test Unbekannt", 64_000_000_000, "USB", None, [], [], [], False),
-                Disk("sdw", "/dev/sdw", "System", 256_000_000_000, "USB", True, [], ["/"], [], True),
+                Disk("sdx", "/dev/sdx", "Samsung SSD 970 EVO Plus 1TB", 1_000_204_886_016, "USB", True, ["Daten"],
+                     [], [], False, False, "usb", "S4EWNX0R123456A"),
+                Disk("sdy", "/dev/sdy", "WDC WD5000AAKX-00ERMA0", 500_107_862_016, "USB", False, [], [], [], False,
+                     False, "usb", "WD-WCC2EXX12345"),
+                Disk("sdz", "/dev/sdz", "Unbekannter USB-Stick", 64_000_000_000, "USB", None, [], [], [], False,
+                     False, "usb", ""),
+                Disk("sda", "/dev/sda", "Crucial CT500MX500SSD1", 500_107_862_016, "SATA", True, [], [], [], False,
+                     True, "sata", "2034E4A1B2C3"),
+                Disk("nvme0n1", "/dev/nvme0n1", "System", 256_000_000_000, "NVMe", True, [], ["/"], [], True,
+                     True, "nvme", "X"),
             ]
+            fx = {"sdx": "nvme", "sdy": "hdd", "sda": "ssd", "sdz": "usb-unsupported", "nvme0n1": "nvme"}
+            payload = {"disks": {}}
+            for name, f in fx.items():
+                try:
+                    payload["disks"][name] = {"smart": json.loads((fixtures / f"smartctl-{f}.json").read_text()),
+                                              "hpa": {"visible": 976773168, "native": 976773168, "enabled": False}}
+                except OSError:
+                    pass
             w.rebuild_disk_list()
-            for d in w.disks:
-                w.select(("disk", d.name))
-                w.show_detail()
-                if not d.is_protected:
-                    for m in MODES:
-                        w.mode_key = m.key
-                        w.update_mode_detail(d)
+            for view in ("wipe", "diag"):
+                w.set_view(view)
+                for d in w.disks:
+                    w.select(("disk", d.name))
+                    w.show_detail()
+                    if view == "wipe" and not d.is_protected:
+                        for m in MODES:
+                            w.mode_key = m.key
+                            w.update_mode_detail(d)
+            w.diag_state = "loading"
+            w.show_detail()
+            w.apply_diag(json.dumps(payload))
+            w.rebuild_disk_list()
+            w.set_view("wipe")
             w.select(("disk", "sdx"))
             w.show_detail()
             shot("linux-1-ssd")
             w.select(("disk", "sdy"))
+            w.mode_key = "secure"
             w.show_detail()
             shot("linux-2-festplatte")
+            for d in w.disks:
+                w.select(("disk", d.name))
+                w.set_view("diag")
+                w.show_detail()
+            w.select(("disk", "sdy"))
+            w.show_detail()
+            shot("linux-5-diagnose")
+            w.select(("disk", "sda"))
+            w.show_detail()
+            shot("linux-6-diagnose-ssd")
+            w.set_view("wipe")
+            w.show_detail()
             tmp = Path(tempfile.mkdtemp())
-            for state in ("starting", "running", "done", "failed", "cancelled"):
-                info = {"id": "smoke-" + state, "disk": asdict(w.disks[0]), "mode": "ssd", "createdAt": time.time() - 100}
-                jd = tmp / state
+            reports_env = os.environ.get("WIPEKIT_REPORTS")
+            if reports_env:
+                globals()["reports_folder"] = lambda: Path(reports_env)
+            else:
+                globals()["reports_folder"] = lambda: tmp / "reports"
+            for key, state, purpose in [("ssd", "starting", ""), ("ssd", "running", ""), ("secure", "done", ""),
+                                        ("quick", "failed", ""), ("ssd", "cancelled", ""), ("check", "running", "scan"),
+                                        ("check", "done", "scan"), ("check", "done", ""), ("purge", "done", ""),
+                                        ("selftest-long", "running", ""), ("selftest-short", "done", "")]:
+                disk = w.disks[1]
+                info = {"id": f"smoke-{key}-{state}-{purpose}", "disk": asdict(disk), "mode": key,
+                        "createdAt": time.time() - 100, "purpose": purpose}
+                jd = tmp / info["id"]
                 jd.mkdir()
+                for nm in ("smart-before.json", "smart-after.json"):
+                    try:
+                        shutil.copy(fixtures / "smartctl-hdd.json", jd / nm)
+                    except OSError:
+                        pass
                 st = HelperStatus(state=state, pid=os.getpid(), phase="Durchgang 1: Zufallsdaten schreiben", step=1,
-                                  stepCount=4, diskSize=w.disks[0].size, bytesDoneTotal=10**11, bytesTotal=15 * 10**11,
-                                  speed=2e8, startedAt=time.time() - 100, updatedAt=time.time(), verified=True,
+                                  stepCount=4, diskSize=disk.size, bytesDoneTotal=10**11, bytesTotal=15 * 10**11,
+                                  speed=1.4e8, startedAt=time.time() - 100, updatedAt=time.time(), verified=True,
                                   trimResult="durchgeführt", message="Testmeldung",
+                                  sampleResult="bestanden – 2080 Stellen gelesen und verglichen",
+                                  purgeMethod="ATA Secure Erase (Enhanced)" if key == "purge" else None,
+                                  hiddenArea="Kein versteckter Bereich (HPA) aktiv.",
+                                  curve=[140 - (i * 0.35) for i in range(150)] if key == "check" else None,
+                                  nonZeroBytes=0 if key == "check" else None, badBlocks=0,
                                   finishedAt=None if state in ACTIVE_STATES else time.time())
                 (jd / "status.json").write_text(st.to_json())
                 j = Job(info, jd)
@@ -1112,14 +1857,18 @@ class WipeKitApp(Adw.Application):
                 w.select(("job", j.id))
                 w.show_detail()
                 w.update_job_page()
-                if state == "running":
+                if key == "ssd" and state == "running":
                     w.update_sleep_status()
                     shot("linux-3-loeschen")
+                if key == "check" and state == "running":
+                    shot("linux-7-oberflaechentest")
                 if not j.active:
                     w.job_finished(j, notify=False)
                     w.show_detail()
-                    if state == "done":
+                    if key == "secure" and state == "done":
                         shot("linux-4-fertig")
+                    if j.kind != "selftest" and not j.reports.get("pdf"):
+                        raise RuntimeError(f"Kein Protokoll für {info['id']}: {j.reports}")
             w.update_sleep_status()
             w.tick()
             self.smoke_ok = True

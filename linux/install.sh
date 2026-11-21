@@ -19,8 +19,8 @@ if [ "$1" = "--uninstall" ]; then
 fi
 
 install -d /usr/lib/wipekit
-install -m 644 wipekit/common.py wipekit/wipekit_gui.py /usr/lib/wipekit/
-install -m 755 wipekit/wipekit-helper /usr/lib/wipekit/
+install -m 644 wipekit/*.py wipekit/report-logo.jpg /usr/lib/wipekit/
+install -m 755 wipekit/wipekit-helper wipekit/wipekit-diag /usr/lib/wipekit/
 install -d /usr/lib/wipekit/icons/hicolor/scalable/actions
 install -m 644 wipekit/icons/hicolor/scalable/actions/*.svg /usr/lib/wipekit/icons/hicolor/scalable/actions/
 install -m 755 packaging/wipekit /usr/bin/wipekit
@@ -30,3 +30,7 @@ install -D -m 644 icons/icon-256.png /usr/share/icons/hicolor/256x256/apps/$APP_
 install -D -m 644 icons/icon-512.png /usr/share/icons/hicolor/512x512/apps/$APP_ID.png
 gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
 echo "WipeKit wurde installiert. Start über das App-Menü oder mit:  wipekit"
+for tool in smartctl hdparm nvme; do
+  command -v $tool >/dev/null 2>&1 || PATH="$PATH:/usr/sbin:/sbin" command -v $tool >/dev/null 2>&1 || \
+    echo "Hinweis: »$tool« fehlt. Für die Diagnose bitte installieren (Pakete: smartmontools, hdparm, nvme-cli)."
+done

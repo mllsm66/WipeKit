@@ -5,10 +5,10 @@
   <vendor>WipeKit</vendor>
   <vendor_url>https://github.com/mllsm66/WipeKit</vendor_url>
   <action id="io.github.mllsm66.WipeKit.wipe">
-    <description>Erase a drive</description>
-    <description xml:lang="de">Laufwerk löschen</description>
-    <message>Authentication is required to erase a drive</message>
-    <message xml:lang="de">Zum Löschen eines Laufwerks ist eine Anmeldung als Administrator erforderlich</message>
+    <description>Erase or test a drive</description>
+    <description xml:lang="de">Laufwerk löschen oder testen</description>
+    <message>Authentication is required to erase or test a drive</message>
+    <message xml:lang="de">Zum Löschen oder Testen eines Laufwerks ist eine Anmeldung als Administrator erforderlich</message>
     <icon_name>drive-harddisk</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>
@@ -16,5 +16,18 @@
       <allow_active>auth_admin</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/wipekit/wipekit-helper</annotate>
+  </action>
+  <action id="io.github.mllsm66.WipeKit.diagnose">
+    <description>Read drive health data</description>
+    <description xml:lang="de">Gesundheitsdaten von Laufwerken lesen</description>
+    <message>Authentication is required to read the health data (S.M.A.R.T.) of drives</message>
+    <message xml:lang="de">Zum Lesen der Gesundheitsdaten (S.M.A.R.T.) der Laufwerke ist eine Anmeldung als Administrator erforderlich</message>
+    <icon_name>drive-harddisk</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/wipekit/wipekit-diag</annotate>
   </action>
 </policyconfig>

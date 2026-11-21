@@ -17,8 +17,9 @@ rm -rf "$STAGE/wipekit/__pycache__"
 # --- .deb ------------------------------------------------------------------
 PKG="$STAGE/deb"
 install -d "$PKG/DEBIAN" "$PKG/usr/lib/wipekit" "$PKG/usr/bin"
-install -m 644 "$STAGE/wipekit/common.py" "$STAGE/wipekit/wipekit_gui.py" "$PKG/usr/lib/wipekit/"
-install -m 755 "$STAGE/wipekit/wipekit-helper" "$PKG/usr/lib/wipekit/"
+install -m 644 "$STAGE"/wipekit/*.py "$PKG/usr/lib/wipekit/"
+install -m 644 assets/report-logo.jpg "$PKG/usr/lib/wipekit/report-logo.jpg"
+install -m 755 "$STAGE/wipekit/wipekit-helper" "$STAGE/wipekit/wipekit-diag" "$PKG/usr/lib/wipekit/"
 install -d "$PKG/usr/lib/wipekit/icons/hicolor/scalable/actions"
 install -m 644 "$STAGE"/wipekit/icons/hicolor/scalable/actions/*.svg "$PKG/usr/lib/wipekit/icons/hicolor/scalable/actions/"
 install -m 755 linux/packaging/wipekit "$PKG/usr/bin/wipekit"
@@ -27,18 +28,22 @@ install -D -m 644 linux/packaging/$APP_ID.policy "$PKG/usr/share/polkit-1/action
 install -D -m 644 assets/icon-256.png "$PKG/usr/share/icons/hicolor/256x256/apps/$APP_ID.png"
 install -D -m 644 assets/icon-512.png "$PKG/usr/share/icons/hicolor/512x512/apps/$APP_ID.png"
 install -D -m 644 LICENSE "$PKG/usr/share/doc/wipekit/copyright"
+install -D -m 644 THIRD-PARTY-NOTICES.md "$PKG/usr/share/doc/wipekit/THIRD-PARTY-NOTICES.md"
 cat > "$PKG/DEBIAN/control" <<CONTROL
 Package: wipekit
 Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), adwaita-icon-theme, librsvg2-common, pkexec | policykit-1, util-linux
+Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), adwaita-icon-theme, librsvg2-common, pkexec | policykit-1, util-linux, smartmontools
+Recommends: hdparm, nvme-cli
 Maintainer: mllsm66 <mllsm66@users.noreply.github.com>
 Homepage: https://github.com/mllsm66/WipeKit
-Description: Externe Laufwerke sicher löschen
- WipeKit überschreibt externe Festplatten, SSDs und USB-Sticks vollständig,
- prüft das Ergebnis und erstellt ein Löschprotokoll.
+Description: Laufwerke sicher löschen und ihre Gesundheit prüfen
+ WipeKit überschreibt Festplatten, SSDs und USB-Sticks vollständig, prüft das
+ Ergebnis und erstellt Lösch- und Gesundheitsberichte (PDF und Text).
+ Die Diagnose zeigt S.M.A.R.T.-Werte, startet Selbsttests und einen
+ Oberflächentest.
 CONTROL
 dpkg-deb --root-owner-group --build "$PKG" "$OUT/WipeKit-Linux-$VERSION.deb"
 
@@ -47,6 +52,8 @@ TAR="$STAGE/WipeKit-$VERSION"
 install -d "$TAR/icons" "$TAR/packaging"
 cp -r "$STAGE/wipekit" "$TAR/wipekit"
 cp linux/packaging/* "$TAR/packaging/"
+cp assets/report-logo.jpg "$TAR/wipekit/report-logo.jpg"
+cp THIRD-PARTY-NOTICES.md "$TAR/"
 cp assets/icon-256.png assets/icon-512.png "$TAR/icons/"
 install -m 755 linux/install.sh "$TAR/install.sh"
 cp LICENSE "$TAR/"
