@@ -832,6 +832,7 @@ struct DiagnoseView: View {
                 StatTile(title: "Temperatur", value: HFmt.temp(h.temperature), tint: Color.primary,
                          footnote: "aktuell", symbol: "thermometer.medium")
             }
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.vertical, 6)
         }
     }
@@ -841,7 +842,7 @@ struct DiagnoseView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(h.reason.isEmpty ? "Für dieses Laufwerk sind keine Gesundheitsdaten verfügbar." : h.reason)
                     .fixedSize(horizontal: false, vertical: true)
-                Spacer()
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Button("Mit Administratorrechten lesen") { model.readHealthAsAdmin(disk) }
                     .help("Manche Laufwerke antworten nur mit Administratorrechten.")
             }
@@ -849,16 +850,17 @@ struct DiagnoseView: View {
                 Text(MacInfo.usbExplanation)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 ForEach(Array(MacInfo.usbWays.enumerated()), id: \.offset) { _, way in
-                    LabeledContent {
-                        EmptyView()
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(way.0).font(.body.weight(.medium))
-                            Text(way.1).font(.callout).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(way.0).font(.body.weight(.medium))
+                        Text(way.1)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
                 }
                 HStack {
                     Link("Infos zum SAT SMART Driver", destination: MacInfo.satDriverURL)

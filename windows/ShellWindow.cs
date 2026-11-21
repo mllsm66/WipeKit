@@ -98,6 +98,11 @@ namespace WipeKit
             refresh.Click += (s, e) => { RefreshDisks(true); ReadAllHealth(true); };
             DockPanel.SetDock(refresh, Dock.Right);
             header.Children.Add(refresh);
+            var info = IconButton("\uE946", "Über WipeKit und Lizenzen");
+            info.Margin = new Thickness(4, 0, 0, 0);
+            info.Click += (s, e) => ShowAbout();
+            DockPanel.SetDock(info, Dock.Right);
+            header.Children.Add(info);
             var folder = IconButton("", "Ordner mit Protokollen und Berichten öffnen (Strg+O)");
             folder.Margin = new Thickness(0, 0, 4, 0);
             folder.Click += (s, e) => OpenReportsFolder();
@@ -399,7 +404,7 @@ namespace WipeKit
         static Grid InfoRow(string label, UIElement value)
         {
             var g = new Grid { MinHeight = 24 };
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(190) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(270) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var l = Text(label, 14, brushKey: "TextFillColorSecondaryBrush", verticalCenter: true);
             g.Children.Add(l);
@@ -1836,7 +1841,12 @@ namespace WipeKit
                                                               ("check", JobState.Done, "scan"), ("check", JobState.Running, "scan"), ("purge", JobState.Done, null), ("maximum", JobState.Cancelled, null) })
                 {
                     var job = new WipeJob(disks[0], WipeMode.ByKey(key), purpose);
-                    job.SetTestState(state, 0.42, "Testmeldung", hdd);
+                    string message = state == JobState.Failed ? "Schreibfehler bei 212 GB von 500 GB: Das Gerät ist nicht bereit. Laufwerk getrennt oder defekt?"
+                        : state == JobState.Cancelled ? "Vom Benutzer abgebrochen. Das Laufwerk ist nur teilweise überschrieben."
+                        : key == "check" ? "Alle Sektoren sind lesbar. Das Laufwerk ist leer (nur Nullen)."
+                        : key == "purge" ? "Die SSD hat sich selbst gelöscht (Sanitize – Crypto Erase). Die Kontrolle der Prüfmarken war erfolgreich."
+                        : "Alle Sektoren wurden überschrieben und die Prüfung war erfolgreich.";
+                    job.SetTestState(state, 0.42, message, hdd);
                     _jobs.Insert(0, job);
                     Select("job", job.Id.ToString());
                     Tick();

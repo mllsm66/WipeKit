@@ -54,6 +54,8 @@ enum SmokeTest {
 
         func spin(_ t: TimeInterval) { RunLoop.current.run(until: Date().addingTimeInterval(t)) }
         func shot(_ name: String) {
+            window.makeKeyAndOrderFront(nil)
+            app.activate(ignoringOtherApps: true)
             spin(1.2)
             guard let dir = shots else { return }
             let view: NSView = window.contentView?.superview ?? hosting
@@ -99,7 +101,11 @@ enum SmokeTest {
                                   step: 1, stepCount: mode.stepCount, diskSize: disks[0].size,
                                   bytesDoneTotal: 400_000_000_000, bytesTotal: 1_500_321_586_048, speed: 142_000_000,
                                   startedAt: Date().addingTimeInterval(-3000), updatedAt: Date(),
-                                  finishedAt: state.isActive ? nil : Date(), message: state == .failed ? "Testfehler" : "Testmeldung",
+                                  finishedAt: state.isActive ? nil : Date(),
+                                  message: state == .failed ? "Schreibfehler bei 212 GB von 500 GB: Input/output error. Laufwerk getrennt oder defekt?"
+                                      : state == .cancelled ? "Vom Benutzer abgebrochen. Das Laufwerk ist nur teilweise überschrieben."
+                                      : mode == .check ? "Alle Sektoren sind lesbar. Das Laufwerk ist leer (nur Nullen)."
+                                      : "Alle Sektoren wurden überschrieben und die Prüfung war erfolgreich.",
                                   verified: state == .done ? true : nil, trimResult: nil, sleepPrevented: state.isActive)
             if mode == .check {
                 let count = state == .running ? 90 : 200
