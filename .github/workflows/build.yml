@@ -100,6 +100,8 @@ jobs:
             sips -Z 1300 -s format jpeg -s formatOptions 82 "$f" --out "$RUNNER_TEMP/s.jpg" >/dev/null
             echo "===BEGIN $(basename "$f" .png).jpg==="; base64 -b 120 -i "$RUNNER_TEMP/s.jpg"; echo "===END==="
           done
+          f=$(ls screenshots/berichte/PDF/*ausfuehrlich*.pdf | head -1)
+          echo "===BEGIN macos-bericht.pdf==="; base64 -b 120 -i "$f"; echo "===END==="
 
       - name: ZIP und Quelltext von smartmontools bereitstellen
         run: |
@@ -224,6 +226,11 @@ jobs:
             for ($i = 0; $i -lt $b64.Length; $i += 120) { Write-Output $b64.Substring($i, [Math]::Min(120, $b64.Length - $i)) }
             Write-Output "===END==="
           }
+          $pdf = Get-ChildItem screenshots\berichte\PDF -Filter *ausfuehrlich*.pdf | Select-Object -First 1
+          Write-Output "===BEGIN windows-bericht.pdf==="
+          $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($pdf.FullName))
+          for ($i = 0; $i -lt $b64.Length; $i += 120) { Write-Output $b64.Substring($i, [Math]::Min(120, $b64.Length - $i)) }
+          Write-Output "===END==="
 
       - name: Echtes Löschen testen (virtuelle Festplatte mit eingehängtem NTFS-Laufwerk)
         shell: pwsh
