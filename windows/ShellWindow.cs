@@ -959,7 +959,7 @@ namespace WipeKit
                 detailStack.Children.Add(explanation);
                 detailStack.Children.Add(Divider());
                 detailStack.Children.Add(Rows(InfoRow("Geeignet für", best), InfoRow("Sicherheit", meter),
-                    InfoRow("Einordnung", standard), InfoRow("Geschätzte Dauer", duration)));
+                    InfoRow("Orientiert sich an", standard), InfoRow("Geschätzte Dauer", duration)));
                 body.Children.Add(Card(detailStack));
                 body.Children.Add(note);
                 body.Children.Add(hint);
@@ -993,7 +993,7 @@ namespace WipeKit
                     double units = m.WorkUnits + (m.Verify == VerifyKind.Samples ? 0.02 : 0);
                     duration.Text = m.Purge ? "Meist Sekunden bis wenige Minuten – je nach SSD"
                         : "ca. " + Fmt.ShortDuration(TimeSpan.FromSeconds(d.Size * units / speed));
-                    note.Text = m.SecurityNote;
+                    note.Text = m.SecurityNote + (m.ReadOnly ? "" : "\n" + WipeMode.NotCertified);
                     string h = null;
                     if (m.ReadOnly || m.Purge) h = null;
                     else if (d.IsSsd == true && m.Key != "ssd") h = "Dieses Laufwerk ist eine SSD – dafür sind »SSD« oder »Firmware-Löschung« besser geeignet.";

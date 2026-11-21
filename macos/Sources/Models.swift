@@ -151,7 +151,7 @@ enum WipeMode: String, Codable, CaseIterable, Identifiable {
     var securityNote: String {
         switch self {
         case .quick:
-            return "Entspricht für Festplatten dem Standard »Clear«. Die Stichproben erkennen typische Fehler wie einen defekten USB-Adapter – eine Lücke an einer einzelnen Stelle kann aber nur die vollständige Prüfung der Modi »Sicher« und »Maximal« ausschließen."
+            return "Orientiert sich für Festplatten am Vorgehen »Clear« (NIST SP 800-88). Die Stichproben erkennen typische Fehler wie einen defekten USB-Adapter – eine Lücke an einer einzelnen Stelle kann aber nur die vollständige Prüfung der Modi »Sicher« und »Maximal« ausschließen."
         case .secure:
             return "Die Prüfung stellt sicher, dass kein Bereich ausgelassen wurde, und erkennt defekte Sektoren sowie unzuverlässige USB-Adapter."
         case .maximum:
@@ -183,9 +183,11 @@ enum WipeMode: String, Codable, CaseIterable, Identifiable {
         case .maximum: return clear + ", mehrfach (angelehnt an DoD 5220.22-M)"
         case .ssd:     return clear + " – für SSDs nach bestem Bemühen"
         case .purge:   return "NIST SP 800-88 Rev. 2 / IEEE 2883 – »Purge« (Firmware-Löschung)"
-        case .check:   return "Keine Löschung – nur Kontrolle"
+        case .check:   return "– (keine Löschung, nur Kontrolle)"
         }
     }
+
+    static let notCertified = "WipeKit ist nicht zertifiziert und steht in keiner Verbindung zu NIST oder anderen Normungsstellen."
 
     /// Empfohlener Modus für ein Laufwerk
     static func recommended(for disk: ExternalDisk) -> WipeMode {

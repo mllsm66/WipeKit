@@ -85,6 +85,8 @@ enum Reports {
     static let orange: RGB = (0.86, 0.55, 0.00)
     static let red: RGB = (0.85, 0.19, 0.15)
 
+    static let notCertified = "Dieses Protokoll dokumentiert den Ablauf. Es ist keine Zertifizierung nach NIST, DoD oder einer anderen Norm; WipeKit steht in keiner Verbindung zu diesen Stellen."
+
     static let unavailableHelp = "Hinweis: Viele USB-Gehäuse und -Adapter geben die Gesundheitsdaten nicht weiter. Abhilfe: das Laufwerk direkt (SATA/NVMe intern), über Thunderbolt/USB4 oder über einen Adapter mit ASMedia-, JMicron- oder Realtek-Chip anschließen."
 
     // MARK: Identität und Dateinamen
@@ -256,7 +258,7 @@ enum Reports {
         let duration = max(0, w.ended.timeIntervalSince(w.started))
         let avg = duration > 0 ? Double(w.bytesWritten) / duration : 0
         var rows: [(String, String)] = [("Ergebnis", res), ("Methode", w.modeTitle), ("Ablauf", w.method),
-                                        ("Einordnung", w.standard)]
+                                        ("Vorgehen orientiert an", w.standard)]
         if !w.purgeMethod.isEmpty { rows.append(("Firmware-Befehl", w.purgeMethod)) }
         rows += [("Beginn", dt(w.started, seconds: true)), ("Ende", dt(w.ended, seconds: true)),
                  ("Dauer", Fmt.duration(duration)),
@@ -298,7 +300,7 @@ enum Reports {
         }
         r.sections.append(ReportSection(title: "Protokoll", blocks: [.kv([
             ("Erstellt", dt(r.created, seconds: true)), ("Rechner", w.host.isEmpty ? "–" : w.host),
-            ("System", w.platform.isEmpty ? "–" : w.platform), ("Programm", "WipeKit \(w.appVersion)")])]))
+            ("System", w.platform.isEmpty ? "–" : w.platform), ("Programm", "WipeKit \(w.appVersion)")]), .text(notCertified)]))
         r.footer = "WipeKit \(w.appVersion)"
         return r
     }

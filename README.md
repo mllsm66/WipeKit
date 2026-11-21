@@ -110,11 +110,11 @@ Windows SmartScreen warnt eventuell: *»Der Computer wurde durch Windows geschü
 SSDs, USB-Sticks und Speicherkarten verteilen Daten intern auf wechselnde Speicherzellen und halten Reservebereiche vor, die von außen nicht erreichbar sind.
 
 - **SSD** füllt das Laufwerk zweimal komplett, prüft alles und gibt danach alle Blöcke per TRIM frei. Damit sind die Daten mit normalen Mitteln praktisch nicht wiederherstellbar; für einzelne Reservezellen gibt es aber keine Garantie.
-- **Firmware-Löschung** lässt die SSD sich selbst löschen – einschließlich der Reservebereiche. Das ist die gründlichste Methode (»Purge« nach NIST SP 800-88). Sie funktioniert nur bei direkt angeschlossenen Laufwerken, die den Befehl unterstützen; USB-Adapter leiten ihn meist nicht weiter.
+- **Firmware-Löschung** lässt die SSD sich selbst löschen – einschließlich der Reservebereiche. Das ist die gründlichste Methode; sie orientiert sich am Vorgehen »Purge« nach NIST SP 800-88. Sie funktioniert nur bei direkt angeschlossenen Laufwerken, die den Befehl unterstützen; USB-Adapter leiten ihn meist nicht weiter.
 
 ## Haftungsausschluss
 
-WipeKit löscht Daten **unwiderruflich**. Prüfe vor jedem Löschvorgang genau, welches Laufwerk ausgewählt ist. Die Software wird ohne jede Gewährleistung bereitgestellt (siehe [Lizenz](LICENSE)). Die Nutzung erfolgt auf eigenes Risiko. WipeKit ist kein zertifiziertes Löschverfahren im Sinne einer Norm. Die Gesundheitsbewertung ist eine Einschätzung anhand der Daten des Laufwerks und keine Garantie für dessen Lebensdauer.
+WipeKit löscht Daten **unwiderruflich**. Prüfe vor jedem Löschvorgang genau, welches Laufwerk ausgewählt ist. Die Software wird ohne jede Gewährleistung bereitgestellt (siehe [Lizenz](LICENSE)). Die Nutzung erfolgt auf eigenes Risiko. WipeKit ist kein zertifiziertes Löschverfahren im Sinne einer Norm. Hinweise auf NIST SP 800-88 oder DoD 5220.22-M beschreiben nur, an welchem Vorgehen sich eine Methode orientiert; WipeKit ist weder von NIST noch von einer anderen Stelle geprüft oder zertifiziert und steht mit ihnen in keiner Verbindung. Die Gesundheitsbewertung ist eine Einschätzung anhand der Daten des Laufwerks und keine Garantie für dessen Lebensdauer.
 
 ## Selbst bauen
 

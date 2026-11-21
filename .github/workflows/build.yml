@@ -7,6 +7,7 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   release:
     types: [published]
@@ -24,7 +25,7 @@ jobs:
 
       - name: Version bestimmen
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; else V="0.0.0-dev"; fi
+          if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; elif [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; else V="0.0.0-dev"; fi
           echo "VERSION=${V#v}" >> "$GITHUB_ENV"
 
       - name: "App bauen (Universal – Intel + Apple Silicon, inkl. smartctl)"
@@ -133,7 +134,7 @@ jobs:
       - name: Version bestimmen
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; V="${V#v}"; else V="0.0.0"; fi
+          if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; V="${V#v}"; elif [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; V="${V#v}"; else V="0.0.0"; fi
           echo "VERSION=${V}" >> "$GITHUB_ENV"
 
       - name: smartctl (smartmontools 7.5) laden und prüfen
@@ -292,7 +293,7 @@ jobs:
 
       - name: Version bestimmen
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; V="${V#v}"; else V="0.0.0"; fi
+          if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; V="${V#v}"; elif [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; V="${V#v}"; else V="0.0.0"; fi
           echo "VERSION=${V}" >> "$GITHUB_ENV"
 
       - name: Abhängigkeiten für den Test installieren
@@ -372,3 +373,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
+
+  # Beim Hochladen eines Versions-Tags (z. B. v1.1.1): Release mit allen Dateien automatisch anlegen
+  release:
+    name: Release veröffentlichen
+    if: github.ref_type == 'tag' && github.event_name == 'push'
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: release
+          pattern: WipeKit-*
+          merge-multiple: true
+
+      - name: Release anlegen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          NOTES="docs/release-notes/$TAG.md"
+          [ -f "$NOTES" ] || { echo "WipeKit $TAG" > "$RUNNER_TEMP/notes.md"; NOTES="$RUNNER_TEMP/notes.md"; }
+          ls -la release
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --title "WipeKit ${TAG#v}" --notes-file "$NOTES" --latest
+          fi

@@ -86,6 +86,7 @@ namespace WipeKit
         public static readonly (double, double, double) Green = (0.12, 0.56, 0.24);
         public static readonly (double, double, double) Orange = (0.86, 0.55, 0.00);
         public static readonly (double, double, double) Red = (0.85, 0.19, 0.15);
+        public const string NotCertified = "Dieses Protokoll dokumentiert den Ablauf. Es ist keine Zertifizierung nach NIST, DoD oder einer anderen Norm; WipeKit steht in keiner Verbindung zu diesen Stellen.";
         const string UnavailableHelp = "Hinweis: Viele USB-Gehäuse und -Adapter geben die Gesundheitsdaten nicht weiter. Abhilfe: das Laufwerk direkt (SATA/NVMe intern), über Thunderbolt/USB4 oder über einen Adapter mit ASMedia-, JMicron- oder Realtek-Chip anschließen.";
 
         static ReportBlock Kv(List<(string, string)> rows) => new ReportBlock { Kv = rows };
@@ -273,7 +274,7 @@ namespace WipeKit
             };
             double duration = Math.Max(0, (w.Ended - w.Started).TotalSeconds);
             double avg = duration > 0 ? w.BytesWritten / duration : 0;
-            var rows = new List<(string, string)> { ("Ergebnis", res), ("Methode", w.ModeTitle), ("Ablauf", w.Method), ("Einordnung", w.Standard) };
+            var rows = new List<(string, string)> { ("Ergebnis", res), ("Methode", w.ModeTitle), ("Ablauf", w.Method), ("Vorgehen orientiert an", w.Standard) };
             if (w.PurgeMethod != "") rows.Add(("Firmware-Befehl", w.PurgeMethod));
             rows.Add(("Beginn", Dt(w.Started, true)));
             rows.Add(("Ende", Dt(w.Ended, true)));
@@ -326,7 +327,7 @@ namespace WipeKit
             {
                 ("Erstellt", Dt(r.Created, true)), ("Rechner", w.Host == "" ? "–" : w.Host),
                 ("System", w.Platform == "" ? "–" : w.Platform), ("Programm", "WipeKit " + w.AppVersion),
-            })));
+            }), Txt(NotCertified)));
             r.Footer = "WipeKit " + w.AppVersion;
             return r;
         }

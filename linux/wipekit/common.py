@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 APP_NAME = "WipeKit"
 APP_ID = "io.github.mllsm66.WipeKit"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 # ---------------------------------------------------------------------------
 # Löschmodi
@@ -56,6 +56,7 @@ class WipeMode:
 
 
 CLEAR = "NIST SP 800-88 Rev. 2 – »Clear« (Überschreiben)"
+NOT_CERTIFIED = "WipeKit ist nicht zertifiziert und steht in keiner Verbindung zu NIST oder anderen Normungsstellen."
 MODES = [
     WipeMode(
         "quick", "Schnell", "wipekit-quick-symbolic", "1 Durchgang · Stichproben-Prüfung",
@@ -64,7 +65,7 @@ MODES = [
         "Anschließend werden Anfang, Ende und rund 2.000 zufällig verteilte Stellen gelesen und mit den "
         "geschriebenen Daten verglichen.",
         "Festplatten (HDD), wenn es schnell gehen soll", 3,
-        "Entspricht für Festplatten dem Standard »Clear«. Die Stichproben erkennen typische Fehler wie "
+        "Orientiert sich für Festplatten am Vorgehen »Clear« (NIST SP 800-88). Die Stichproben erkennen typische Fehler wie "
         "einen defekten USB-Adapter – eine Lücke an einer einzelnen Stelle kann aber nur die vollständige "
         "Prüfung der Modi »Sicher« und »Maximal« ausschließen.",
         "1 Durchgang Zufallsdaten + Stichproben-Prüfung (Anfang, Ende, ca. 2.000 Stellen)", CLEAR,
@@ -110,7 +111,7 @@ MODES = [
         "gelöscht, die kein Programm von außen erreicht. Vorher werden Prüfmarken geschrieben, "
         "anschließend wird kontrolliert, dass sie verschwunden sind.",
         "Interne SATA- und NVMe-SSDs – die gründlichste Methode für SSDs", 5,
-        "Entspricht »Purge« nach NIST SP 800-88 / IEEE 2883. Funktioniert nur bei direkt angeschlossenen "
+        "Orientiert sich am Vorgehen »Purge« nach NIST SP 800-88 / IEEE 2883. Funktioniert nur bei direkt angeschlossenen "
         "Laufwerken (SATA/NVMe) – USB-Adapter leiten die Befehle meist nicht zuverlässig weiter.",
         "Firmware-Löschbefehl des Laufwerks + Kontrolle von Prüfmarken",
         "NIST SP 800-88 Rev. 2 / IEEE 2883 – »Purge« (Firmware-Löschung)", purge=True,
@@ -124,7 +125,7 @@ MODES = [
         "Kontrolle eines bereits gelöschten oder neuen Laufwerks", 0,
         "Nach »Sicher« und »Maximal« ist ein Laufwerk leer (nur Nullen). Nach »Schnell« und »SSD« "
         "enthält es Zufallsdaten und gilt deshalb hier als »nicht leer« – das ist dann kein Fehler.",
-        "Vollständiges Lesen aller Sektoren, keine Schreibzugriffe", "Keine Löschung – nur Kontrolle",
+        "Vollständiges Lesen aller Sektoren, keine Schreibzugriffe", "– (keine Löschung, nur Kontrolle)",
         read_only=True,
     ),
 ]

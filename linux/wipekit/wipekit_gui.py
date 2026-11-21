@@ -24,7 +24,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from common import (  # noqa: E402
-    ACTIVE_STATES, APP_ID, APP_NAME, MODES, MODES_BY_KEY, VERSION, Disk, HelperStatus,
+    ACTIVE_STATES, APP_ID, APP_NAME, MODES, MODES_BY_KEY, NOT_CERTIFIED, VERSION, Disk, HelperStatus,
     fmt_bytes, fmt_clock, fmt_datetime, fmt_duration, fmt_exact_bytes, fmt_percent, fmt_short_duration,
     fmt_speed, list_disks, pid_alive, recommended_mode,
 )
@@ -876,7 +876,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.mode_security_label = label("")
             self.mode_security.add_suffix(self.mode_level)
             self.mode_security.add_suffix(self.mode_security_label)
-            self.mode_standard = row("Einordnung", "", prop=True)
+            self.mode_standard = row("Orientiert sich an", "", prop=True)
             self.mode_duration = row("Geschätzte Dauer", "", prop=True)
             self.mode_note = label("", css=("dim-label", "caption"), wrap=True)
             self.mode_note.set_margin_top(10)
@@ -925,7 +925,7 @@ class MainWindow(Adw.ApplicationWindow):
             speed = 300e6 if d.is_ssd is True else 130e6
             units = m.work_units + (0.02 if m.verify == "samples" else 0)
             self.mode_duration.set_subtitle("ca. " + fmt_short_duration(d.size * units / speed))
-        self.mode_note.set_label(m.security_note)
+        self.mode_note.set_label(m.security_note + ("" if m.read_only else "\n" + NOT_CERTIFIED))
         hint = None
         if m.read_only:
             hint = None

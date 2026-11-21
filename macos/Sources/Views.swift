@@ -657,7 +657,7 @@ struct ModeDetailSection: View {
             LabeledContent("Sicherheit") {
                 SecurityMeter(level: mode.securityLevel, label: mode.securityLabel, tint: mode.tint)
             }
-            LabeledContent("Einordnung") {
+            LabeledContent("Orientiert sich an") {
                 Text(mode.standard)
                     .multilineTextAlignment(.trailing)
             }
@@ -670,6 +670,10 @@ struct ModeDetailSection: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(mode.securityNote)
                     .fixedSize(horizontal: false, vertical: true)
+                if !mode.readOnly {
+                    Text(WipeMode.notCertified)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let hint = hint {
                     Label {
                         Text(hint).fixedSize(horizontal: false, vertical: true)

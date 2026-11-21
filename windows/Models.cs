@@ -38,6 +38,8 @@ namespace WipeKit
 
         public static string PatternLabel(Pattern p) => p == Pattern.Zeros ? "Nullen schreiben" : "Zufallsdaten schreiben";
 
+        public const string NotCertified = "WipeKit ist nicht zertifiziert und steht in keiner Verbindung zu NIST oder anderen Normungsstellen.";
+
         const string Clear = "NIST SP 800-88 Rev. 2 – »Clear« (Überschreiben)";
 
         public static readonly WipeMode[] All =
@@ -49,7 +51,7 @@ namespace WipeKit
                 Explanation = "Überschreibt jeden Sektor des Laufwerks einmal mit kryptografisch erzeugten Zufallsdaten. Anschließend werden Anfang, Ende und rund 2.000 zufällig verteilte Stellen gelesen und mit den geschriebenen Daten verglichen.",
                 BestFor = "Festplatten (HDD), wenn es schnell gehen soll",
                 SecurityLevel = 3,
-                SecurityNote = "Entspricht für Festplatten dem Standard »Clear«. Die Stichproben erkennen typische Fehler wie einen defekten USB-Adapter – eine Lücke an einer einzelnen Stelle kann aber nur die vollständige Prüfung der Modi »Sicher« und »Maximal« ausschließen.",
+                SecurityNote = "Orientiert sich für Festplatten am Vorgehen »Clear« (NIST SP 800-88). Die Stichproben erkennen typische Fehler wie einen defekten USB-Adapter – eine Lücke an einer einzelnen Stelle kann aber nur die vollständige Prüfung der Modi »Sicher« und »Maximal« ausschließen.",
                 MethodDescription = "1 Durchgang Zufallsdaten + Stichproben-Prüfung (Anfang, Ende, ca. 2.000 Stellen)",
                 Standard = Clear,
                 Tint = Color.FromRgb(0xF7, 0x63, 0x0C),
@@ -97,7 +99,7 @@ namespace WipeKit
                 Explanation = "Lässt die NVMe-SSD sich selbst löschen (»Sanitize – Crypto Erase«). Dabei werden auch Reserve- und Verwaltungsbereiche gelöscht, die kein Programm von außen erreicht. Vorher werden Prüfmarken geschrieben, anschließend wird kontrolliert, dass sie verschwunden sind.",
                 BestFor = "Interne NVMe-SSDs – die gründlichste Methode für SSDs",
                 SecurityLevel = 5,
-                SecurityNote = "Entspricht »Purge« nach NIST SP 800-88 / IEEE 2883. Unter Windows nur für direkt angeschlossene NVMe-SSDs möglich, die den Befehl unterstützen (Windows 10 21H1 oder neuer). SATA-SSDs: unter Linux oder mit dem Werkzeug des Herstellers.",
+                SecurityNote = "Orientiert sich am Vorgehen »Purge« nach NIST SP 800-88 / IEEE 2883. Unter Windows nur für direkt angeschlossene NVMe-SSDs möglich, die den Befehl unterstützen (Windows 10 21H1 oder neuer). SATA-SSDs: unter Linux oder mit dem Werkzeug des Herstellers.",
                 MethodDescription = "Firmware-Löschbefehl der SSD (Sanitize – Crypto Erase) + Kontrolle von Prüfmarken",
                 Standard = "NIST SP 800-88 Rev. 2 / IEEE 2883 – »Purge« (Firmware-Löschung)",
                 Tint = Color.FromRgb(0x88, 0x17, 0x98),
@@ -111,7 +113,7 @@ namespace WipeKit
                 SecurityLevel = 0,
                 SecurityNote = "Nach »Sicher« und »Maximal« ist ein Laufwerk leer (nur Nullen). Nach »Schnell« und »SSD« enthält es Zufallsdaten und gilt deshalb hier als »nicht leer« – das ist dann kein Fehler.",
                 MethodDescription = "Vollständiges Lesen aller Sektoren, keine Schreibzugriffe",
-                Standard = "Keine Löschung – nur Kontrolle",
+                Standard = "– (keine Löschung, nur Kontrolle)",
                 Tint = Color.FromRgb(0x00, 0x67, 0xC0),
             },
         };

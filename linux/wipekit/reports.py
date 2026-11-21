@@ -17,6 +17,8 @@ from pathlib import Path
 import health as hl
 import pdfdoc
 
+NOT_CERTIFIED = "Dieses Protokoll dokumentiert den Ablauf. Es ist keine Zertifizierung nach NIST, DoD oder einer anderen Norm; WipeKit steht in keiner Verbindung zu diesen Stellen."
+
 KIND_HEALTH = ("Gesundheitsbericht", "Gesundheitsbericht")
 KIND_WIPE = ("Löschprotokoll", "Loeschprotokoll")
 KIND_WIPE_FULL = ("Löschprotokoll (ausführlich)", "Loeschprotokoll-ausfuehrlich")
@@ -262,7 +264,7 @@ def wipe_report(w: WipeInfo, ident: Identity, before=None, after=None, detailed=
                banner=(result, color))
     duration = max(0.0, (w.ended or 0) - (w.started or 0))
     avg = w.bytes_written / duration if duration > 0 else 0
-    rows = [("Ergebnis", result), ("Methode", w.mode_title), ("Ablauf", w.method), ("Einordnung", w.standard)]
+    rows = [("Ergebnis", result), ("Methode", w.mode_title), ("Ablauf", w.method), ("Vorgehen orientiert an", w.standard)]
     if w.purge_method:
         rows.append(("Firmware-Befehl", w.purge_method))
     rows += [("Beginn", fmt_dt_sec(w.started)), ("Ende", fmt_dt_sec(w.ended)), ("Dauer", fmt_duration(duration)),
@@ -303,7 +305,7 @@ def wipe_report(w: WipeInfo, ident: Identity, before=None, after=None, detailed=
             r.sections += secs
     r.sections.append(Section("Protokoll", [("kv", [
         ("Erstellt", fmt_dt_sec(r.created)), ("Rechner", w.host or "–"), ("System", w.platform or "–"),
-        ("Programm", f"WipeKit {w.app_version}".strip())])]))
+        ("Programm", f"WipeKit {w.app_version}".strip())]), ("text", NOT_CERTIFIED)]))
     r.footer = f"WipeKit {w.app_version}".strip()
     return r
 
