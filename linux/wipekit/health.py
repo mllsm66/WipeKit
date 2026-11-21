@@ -386,7 +386,7 @@ def rate(h: Health, nvme=None):
     if isinstance(h.life_percent, int) and 5 < h.life_percent <= 20:
         reasons_caution.append(f"Restlebensdauer {h.life_percent} %.")
     if nvme and isinstance(nvme.get("available_spare"), int) and isinstance(nvme.get("available_spare_threshold"), int) \
-            and nvme["available_spare"] <= nvme["available_spare_threshold"]:
+            and 0 < nvme["available_spare_threshold"] and nvme["available_spare"] < nvme["available_spare_threshold"]:
         reasons_caution.append("Reservespeicher der SSD aufgebraucht.")
     if isinstance(h.reallocated, int) and 0 < h.reallocated < 50:
         reasons_good.append(f"{h.reallocated} ersetzte Sektoren (unkritisch).")

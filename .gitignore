@@ -8,3 +8,5 @@ windows/obj/
 .DS_Store
 .vs/
 *.user
+macos/vendor/
+windows/vendor/

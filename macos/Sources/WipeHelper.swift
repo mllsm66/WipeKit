@@ -1,5 +1,6 @@
 import Foundation
 import IOKit.pwr_mgt
+import CryptoKit
 
 /// Lösch-Prozess. Läuft als root (gestartet über die Administrator-Passwortabfrage).
 ///
@@ -178,6 +179,8 @@ final class WipeEngine {
     private var assertionID: IOPMAssertionID = 0
     private var hasAssertion = false
     private let allowDiskImage: Bool
+    private var diskValidated = false
+    private var sampleHashes: [UInt64: Data] = [:]
 
     init(disk: String, mode: WipeMode?, dir: URL, expectedSize: UInt64, allowDiskImage: Bool = false) {
         self.allowDiskImage = allowDiskImage
@@ -207,37 +210,55 @@ final class WipeEngine {
         writeStatus()
 
         guard geteuid() == 0 else { return finish(.failed, "Keine Administratorrechte.") }
-        guard let mode = self.mode else { return finish(.failed, "Unbekannter Löschmodus.") }
+        guard let mode = self.mode else { return finish(.failed, "Unbekannter Modus.") }
         guard DiskService.isValidWholeDiskID(disk) else { return finish(.failed, "Ungültige Laufwerkskennung »\(disk)«.") }
+        guard mode.availableOnMac else {
+            return finish(.failed, "Die Firmware-Löschung ist unter macOS nicht möglich – macOS gibt diese Befehle nicht frei.")
+        }
 
         // --- Sicherheitsprüfungen -------------------------------------------------------------
         let protected = DiskService.protectedDisks()
-        guard !protected.isEmpty else {
-            return finish(.failed, "Das Startlaufwerk konnte nicht ermittelt werden – Abbruch aus Sicherheitsgründen.")
-        }
-        guard !protected.contains(disk) else {
-            return finish(.failed, "\(disk) enthält das laufende macOS und wird niemals gelöscht.")
-        }
         let info = Shell.diskutilPlist(["info", "-plist", disk]) ?? [:]
         // Nur für die automatischen Tests: ein Disk-Image (niemals ein echtes Laufwerk)
         let isTestImage = allowDiskImage && (info["BusProtocol"] as? String) == "Disk Image"
         if !isTestImage {
-            let externals = (Shell.diskutilPlist(["list", "-plist", "external", "physical"])?["WholeDisks"] as? [String]) ?? []
-            guard externals.contains(disk) else {
-                return finish(.failed, "\(disk) ist kein angeschlossenes externes Laufwerk (mehr).")
-            }
-            if (info["Internal"] as? Bool) == true {
-                return finish(.failed, "\(disk) ist ein internes Laufwerk – Abbruch.")
+            let physical = (Shell.diskutilPlist(["list", "-plist", "physical"])?["WholeDisks"] as? [String]) ?? []
+            guard physical.contains(disk) else {
+                return finish(.failed, "\(disk) ist nicht (mehr) angeschlossen.")
             }
         }
+        if !mode.readOnly {
+            guard !protected.isEmpty else {
+                return finish(.failed, "Das Startlaufwerk konnte nicht ermittelt werden – Abbruch aus Sicherheitsgründen.")
+            }
+            guard !protected.contains(disk) else {
+                return finish(.failed, "\(disk) enthält das laufende macOS und wird niemals gelöscht.")
+            }
+            if !isTestImage {
+                let externals = (Shell.diskutilPlist(["list", "-plist", "external", "physical"])?["WholeDisks"] as? [String]) ?? []
+                guard externals.contains(disk) else {
+                    return finish(.failed, "\(disk) ist kein angeschlossenes externes Laufwerk (mehr).")
+                }
+                if (info["Internal"] as? Bool) == true {
+                    return finish(.failed, "\(disk) ist ein internes Laufwerk – Abbruch.")
+                }
+            }
+        }
+        diskValidated = true
 
         // --- Ruhezustand verhindern (Display darf ausgehen) -----------------------------------
-        let reason = "WipeKit: Löschvorgang auf \(disk)" as CFString
+        let reason = "WipeKit: Vorgang auf \(disk)" as CFString
         let r = IOPMAssertionCreateWithName("PreventUserIdleSystemSleep" as CFString,
                                             IOPMAssertionLevel(kIOPMAssertionLevelOn),
                                             reason, &assertionID)
         hasAssertion = (r == kIOReturnSuccess)
         status.sleepPrevented = hasAssertion
+
+        status.phase = "Gesundheitsdaten werden gelesen …"
+        writeStatus()
+        saveSmart("smart-before.json")
+
+        if mode.readOnly { return runCheck() }
 
         // --- Aushängen (diskutil unmountDisk) --------------------------------------------------
         status.phase = "Laufwerk wird ausgehängt …"
@@ -246,32 +267,11 @@ final class WipeEngine {
 
         // --- Raw-Device öffnen (/dev/rdiskN wie bei dd) -------------------------------------------
         let fd = open("/dev/r\(disk)", O_RDWR)
-        guard fd >= 0 else {
-            let e = errno
-            var msg = "/dev/r\(disk) konnte nicht geöffnet werden: \(String(cString: strerror(e)))."
-            if e == EPERM || e == EACCES {
-                msg += " Tipp: WipeKit unter Systemeinstellungen › Datenschutz & Sicherheit › Festplattenvollzugriff erlauben."
-            } else if e == EBUSY {
-                msg += " Das Laufwerk wird noch benutzt – bitte in anderen Programmen auswerfen."
-            }
-            return finish(.failed, msg)
-        }
+        guard fd >= 0 else { return finish(.failed, openError(errno)) }
         defer { close(fd) }
 
-        // --- Größe ermitteln -----------------------------------------------------------------
-        var blockSize: UInt32 = 0
-        var blockCount: UInt64 = 0
-        let okBS = (withUnsafeMutablePointer(to: &blockSize) { ioctl(fd, WipeEngine.DKIOCGETBLOCKSIZE, $0) }) == 0
-        let okBC = (withUnsafeMutablePointer(to: &blockCount) { ioctl(fd, WipeEngine.DKIOCGETBLOCKCOUNT, $0) }) == 0
-        var size: UInt64 = (okBS && okBC) ? UInt64(blockSize) * blockCount : 0
-        if size == 0 { size = expectedSize }
-        guard size > 0 else { return finish(.failed, "Die Größe des Laufwerks konnte nicht ermittelt werden.") }
-        if expectedSize > 0 {
-            let diff = size > expectedSize ? size - expectedSize : expectedSize - size
-            if diff > 1024 * 1024 {
-                return finish(.failed, "Die Größe von \(disk) hat sich geändert (\(Fmt.bytes(size)) statt \(Fmt.bytes(expectedSize))). Wurde das Laufwerk getauscht? Abbruch aus Sicherheitsgründen.")
-            }
-        }
+        guard let size = diskSize(fd) else { return finish(.failed, sizeError) }
+        if let m = sizeMismatch(size) { return finish(.failed, m) }
 
         // --- Puffer ----------------------------------------------------------------------------
         let chunk = WipeEngine.chunkSize
@@ -283,9 +283,10 @@ final class WipeEngine {
         defer { free(writeBuf); free(readBuf); free(expectBuf) }
 
         // --- Los geht's ----------------------------------------------------------------------
+        let samples = mode.verify == .samples ? WipeEngine.pickSamples(size: size, count: 2048) : []
         status.diskSize = size
         status.stepCount = mode.stepCount
-        status.bytesTotal = size * UInt64(mode.workUnits)
+        status.bytesTotal = size * UInt64(mode.workUnits) + UInt64(samples.count) * WipeEngine.mib
         status.state = .running
         status.startedAt = Date()
         var base: UInt64 = 0
@@ -294,7 +295,8 @@ final class WipeEngine {
             status.step = idx + 1
             status.phase = mode.passes.count > 1 ? "Durchgang \(idx + 1): \(pattern.label)" : pattern.label
             writeStatus()
-            switch writePass(fd: fd, buf: writeBuf, size: size, pattern: pattern, base: base) {
+            let last = idx == mode.passes.count - 1
+            switch writePass(fd: fd, buf: writeBuf, size: size, pattern: pattern, base: base, samples: last ? samples : []) {
             case .ok: break
             case .cancelled: return finish(.cancelled, "Vom Benutzer abgebrochen. Das Laufwerk ist nur teilweise überschrieben.")
             case .failed(let m): return finish(.failed, m)
@@ -302,7 +304,7 @@ final class WipeEngine {
             base += size
         }
 
-        if mode.verifies {
+        if mode.verify == .full {
             status.step = mode.passes.count + 1
             status.phase = "Prüfen (gesamte Platte lesen)"
             writeStatus()
@@ -313,6 +315,28 @@ final class WipeEngine {
             case .failed(let m):
                 status.verified = false
                 return finish(.failed, m)
+            }
+        } else if mode.verify == .samples {
+            status.step = mode.passes.count + 1
+            status.phase = "Stichproben prüfen"
+            writeStatus()
+            var bad: [UInt64] = []
+            for (i, s) in samples.enumerated() {
+                if cancelRequested() { return finish(.cancelled, "Stichproben-Prüfung abgebrochen. Überschrieben wurde vollständig.") }
+                if !readFully(fd: fd, buf: readBuf, count: Int(WipeEngine.mib), offset: s)
+                    || sampleHashes[s] != WipeEngine.sha(readBuf, Int(WipeEngine.mib)) {
+                    bad.append(s)
+                }
+                reportProgress(base + UInt64(i + 1) * WipeEngine.mib)
+            }
+            if bad.isEmpty {
+                status.verified = true
+                status.sampleResult = "bestanden – \(samples.count) Stellen (je 1 MiB, inkl. Anfang und Ende) gelesen und verglichen"
+            } else {
+                status.verified = false
+                let where_ = bad.prefix(3).map { Fmt.bytes($0) }.joined(separator: ", ")
+                status.sampleResult = "\(bad.count) von \(samples.count) geprüften Stellen auffällig (z. B. bei \(where_))."
+                return finish(.failed, "Stichproben-Prüfung FEHLGESCHLAGEN: \(status.sampleResult ?? "") Das Laufwerk (oder der Adapter) arbeitet nicht zuverlässig.")
             }
         }
 
@@ -326,17 +350,188 @@ final class WipeEngine {
             }
         }
 
-        return finish(.done, mode.verifies
+        return finish(.done, mode.verify == .full
             ? "Alle Sektoren wurden überschrieben und die Prüfung war erfolgreich."
-            : "Alle Sektoren wurden mit Zufallsdaten überschrieben.")
+            : "Alle Sektoren wurden mit Zufallsdaten überschrieben; die Stichproben-Prüfung war erfolgreich.")
+    }
+
+    // MARK: Öffnen und Größe
+
+    private let sizeError = "Die Größe des Laufwerks konnte nicht ermittelt werden."
+
+    private func openError(_ e: Int32) -> String {
+        var msg = "/dev/r\(disk) konnte nicht geöffnet werden: \(String(cString: strerror(e)))."
+        if e == EPERM || e == EACCES {
+            msg += " Tipp: WipeKit unter Systemeinstellungen › Datenschutz & Sicherheit › Festplattenvollzugriff erlauben."
+        } else if e == EBUSY {
+            msg += " Das Laufwerk wird noch benutzt – bitte in anderen Programmen auswerfen."
+        }
+        return msg
+    }
+
+    private func diskSize(_ fd: Int32) -> UInt64? {
+        var blockSize: UInt32 = 0
+        var blockCount: UInt64 = 0
+        let okBS = (withUnsafeMutablePointer(to: &blockSize) { ioctl(fd, WipeEngine.DKIOCGETBLOCKSIZE, $0) }) == 0
+        let okBC = (withUnsafeMutablePointer(to: &blockCount) { ioctl(fd, WipeEngine.DKIOCGETBLOCKCOUNT, $0) }) == 0
+        var size: UInt64 = (okBS && okBC) ? UInt64(blockSize) * blockCount : 0
+        if size == 0 { size = expectedSize }
+        return size > 0 ? size : nil
+    }
+
+    private func sizeMismatch(_ size: UInt64) -> String? {
+        guard expectedSize > 0 else { return nil }
+        let diff = size > expectedSize ? size - expectedSize : expectedSize - size
+        if diff > 1024 * 1024 {
+            return "Die Größe von \(disk) hat sich geändert (\(Fmt.bytes(size)) statt \(Fmt.bytes(expectedSize))). Wurde das Laufwerk getauscht? Abbruch aus Sicherheitsgründen."
+        }
+        return nil
+    }
+
+    // MARK: Gesundheitsdaten
+
+    private func saveSmart(_ name: String) {
+        guard diskValidated, !allowDiskImage || SmartService.smartctlPath != nil else { return }
+        let (_, raw) = SmartService.read(disk)
+        let path = dir.appendingPathComponent(name).path
+        let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o644)
+        guard fd >= 0 else { return }
+        _ = raw.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        fchmod(fd, 0o644)
+        close(fd)
+    }
+
+    // MARK: Nur prüfen / Oberflächentest
+
+    private func runCheck() -> Int32 {
+        let fd = open("/dev/r\(disk)", O_RDONLY)
+        guard fd >= 0 else { return finish(.failed, openError(errno)) }
+        defer { close(fd) }
+        guard let size = diskSize(fd) else { return finish(.failed, sizeError) }
+        if let m = sizeMismatch(size) { return finish(.failed, m) }
+        let chunk = WipeEngine.chunkSize
+        guard let buf = alignedAlloc(chunk), let zero = alignedAlloc(chunk) else {
+            return finish(.failed, "Nicht genügend Arbeitsspeicher.")
+        }
+        defer { free(buf); free(zero) }
+        memset(zero, 0, chunk)
+        status.diskSize = size
+        status.stepCount = 1
+        status.step = 1
+        status.bytesTotal = size
+        status.state = .running
+        status.startedAt = Date()
+        status.phase = "Alle Sektoren lesen"
+        status.curve = []
+        status.nonZeroBytes = 0
+        status.badBlocks = 0
+        let bucket = max(UInt64(chunk), size / 200)
+        var bucketStart: UInt64 = 0
+        var bucketTime = Date()
+        var offset: UInt64 = 0
+        while offset < size {
+            if cancelRequested() { return finish(.cancelled, "Vom Benutzer abgebrochen.") }
+            let n = Int(min(UInt64(chunk), size - offset))
+            if readFully(fd: fd, buf: buf, count: n, offset: offset) {
+                if memcmp(buf, zero, n) != 0 { status.nonZeroBytes! += countNonZero(buf, n, zero) }
+            } else if let fail = readSlowly(fd: fd, buf: buf, count: n, offset: offset, zero: zero) {
+                return finish(.failed, fail)
+            }
+            offset += UInt64(n)
+            if offset - bucketStart >= bucket || offset >= size {
+                let dt = max(0.000001, Date().timeIntervalSince(bucketTime))
+                status.curve!.append((Double(offset - bucketStart) / dt / 1e6 * 10).rounded() / 10)
+                bucketStart = offset
+                bucketTime = Date()
+            }
+            reportProgress(offset)
+        }
+        let nz = status.nonZeroBytes ?? 0
+        let bad = status.badBlocks ?? 0
+        var msg = bad > 0 ? "\(bad) unlesbare Bereiche (je 64 KiB) gefunden – das Laufwerk ist beschädigt. " : "Alle Sektoren sind lesbar. "
+        if nz == 0 {
+            msg += "Das Laufwerk ist leer (nur Nullen)."
+        } else {
+            let pct = String(format: "%.1f", Double(nz) / Double(size) * 100).replacingOccurrences(of: ".", with: ",")
+            msg += "\(Fmt.bytes(nz)) (\(pct) %) enthalten Daten (nicht nur Nullen)."
+        }
+        status.verified = nz == 0 && bad == 0
+        return finish(.done, msg)
+    }
+
+    private func countNonZero(_ buf: UnsafeMutableRawPointer, _ n: Int, _ zero: UnsafeMutableRawPointer) -> UInt64 {
+        var total: UInt64 = 0
+        var o = 0
+        let mib = Int(WipeEngine.mib)
+        while o < n {
+            let m = min(mib, n - o)
+            if memcmp(buf + o, zero, m) != 0 { total += UInt64(m) }
+            o += m
+        }
+        return total
+    }
+
+    /// Bei einem Lesefehler: den Block in 64-KiB-Stücken lesen und defekte Stücke zählen.
+    private func readSlowly(fd: Int32, buf: UnsafeMutableRawPointer, count n: Int, offset: UInt64,
+                            zero: UnsafeMutableRawPointer) -> String? {
+        let sub = 64 * 1024
+        var o = 0
+        while o < n {
+            let m = min(sub, n - o)
+            if readFully(fd: fd, buf: buf + o, count: m, offset: offset + UInt64(o)) {
+                if memcmp(buf + o, zero, m) != 0 { status.nonZeroBytes! += UInt64(m) }
+            } else {
+                status.badBlocks! += 1
+                if status.badBlocks! >= 4096 {
+                    return "Mehr als 4096 unlesbare Bereiche – Test abgebrochen. Das Laufwerk ist stark beschädigt."
+                }
+            }
+            o += m
+        }
+        return nil
+    }
+
+    private func readFully(fd: Int32, buf: UnsafeMutableRawPointer, count n: Int, offset: UInt64) -> Bool {
+        var done = 0
+        while done < n {
+            let r = pread(fd, buf + done, n - done, off_t(offset) + off_t(done))
+            if r < 0 {
+                if errno == EINTR { continue }
+                return false
+            }
+            if r == 0 { return false }
+            done += r
+        }
+        return true
+    }
+
+    // MARK: Stichproben
+
+    static let mib: UInt64 = 1024 * 1024
+
+    /// 1-MiB-Stichproben: Anfang und Ende (je 16 MiB) plus zufällig verteilte Stellen
+    static func pickSamples(size: UInt64, count: Int) -> [UInt64] {
+        guard size >= mib else { return [] }
+        let last = (size - mib) / mib
+        var picks = Set<UInt64>()
+        for i in 0..<min(16, last + 1) { picks.insert(i) }
+        for i in (last >= 15 ? last - 15 : 0)...last { picks.insert(i) }
+        let want = min(Int(last + 1), picks.count + count)
+        while picks.count < want { picks.insert(UInt64.random(in: 0...last)) }
+        return picks.sorted().map { $0 * mib }
+    }
+
+    static func sha(_ p: UnsafeMutableRawPointer, _ n: Int) -> Data {
+        Data(SHA256.hash(data: UnsafeRawBufferPointer(start: p, count: n)))
     }
 
     // MARK: Durchgänge
 
     private func writePass(fd: Int32, buf: UnsafeMutableRawPointer, size: UInt64,
-                           pattern: WipePattern, base: UInt64) -> StepResult {
+                           pattern: WipePattern, base: UInt64, samples: [UInt64] = []) -> StepResult {
         let chunk = WipeEngine.chunkSize
         if pattern == .zeros { memset(buf, 0, chunk) }
+        let sampleSet = Set(samples)
         var offset: UInt64 = 0
         while offset < size {
             if cancelRequested() { return .cancelled }
@@ -345,6 +540,15 @@ final class WipeEngine {
             case .random: arc4random_buf(buf, n)
             case .seeded: fillSeeded(buf, count: n, offset: offset)
             case .zeros:  break
+            }
+            if !sampleSet.isEmpty {
+                var s = offset
+                while s < offset + UInt64(n) {
+                    if sampleSet.contains(s) && s + WipeEngine.mib <= offset + UInt64(n) {
+                        sampleHashes[s] = WipeEngine.sha(buf + Int(s - offset), Int(WipeEngine.mib))
+                    }
+                    s += WipeEngine.mib
+                }
             }
             var done = 0
             while done < n {
@@ -491,6 +695,10 @@ final class WipeEngine {
 
     private func finish(_ state: JobState, _ message: String) -> Int32 {
         print("Ende: \(state.rawValue) – \(message)")
+        if diskValidated {
+            status.phase = "Gesundheitsdaten werden gelesen …"
+            saveSmart("smart-after.json")
+        }
         if hasAssertion {
             IOPMAssertionRelease(assertionID)   // ab jetzt darf der Mac wieder schlafen
             hasAssertion = false

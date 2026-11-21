@@ -64,6 +64,18 @@ if [ ${#built[@]} -eq 0 ]; then
 fi
 
 lipo -create "${built[@]}" -output "$APP/Contents/MacOS/$APP_NAME"
+
+# smartctl (smartmontools, GPL) für die Diagnose – eigenständiges Programm im App-Paket
+if bash build-smartctl.sh; then
+  cp vendor/smartctl "$APP/Contents/MacOS/smartctl"
+  mkdir -p "$APP/Contents/Resources/Lizenzen"
+  cp vendor/smartmontools-COPYING.txt "$APP/Contents/Resources/Lizenzen/smartmontools-COPYING.txt"
+else
+  echo "⚠️  smartctl fehlt – die Diagnose zeigt dann keine Gesundheitsdaten an."
+fi
+cp ../assets/report-logo.jpg "$APP/Contents/Resources/report-logo.jpg"
+cp ../THIRD-PARTY-NOTICES.md ../LICENSE "$APP/Contents/Resources/" 2>/dev/null || true
+if [ -f ../licenses/GPL-2.0.txt ]; then mkdir -p "$APP/Contents/Resources/Lizenzen"; cp ../licenses/GPL-2.0.txt "$APP/Contents/Resources/Lizenzen/"; fi
 rm -f "${built[@]}"
 cp Info.plist "$APP/Contents/Info.plist"
 # Versionsnummer setzen (z. B. VERSION=1.0.0 bash build.sh)
@@ -86,6 +98,7 @@ if [ -f "$ICON_SRC" ]; then
   rm -rf "$ICONSET"
 fi
 
+if [ -f "$APP/Contents/MacOS/smartctl" ]; then codesign --force --sign - "$APP/Contents/MacOS/smartctl"; fi
 codesign --force --sign - "$APP"
 
 echo ""

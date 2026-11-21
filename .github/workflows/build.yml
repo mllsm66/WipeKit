@@ -27,32 +27,85 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then V="${{ github.event.release.tag_name }}"; else V="0.0.0-dev"; fi
           echo "VERSION=${V#v}" >> "$GITHUB_ENV"
 
-      - name: "App bauen (Universal – Intel + Apple Silicon)"
+      - name: "App bauen (Universal – Intel + Apple Silicon, inkl. smartctl)"
         run: bash macos/build.sh
 
-      - name: Echtes Löschen testen (eingehängtes Disk-Image, als root)
+      - name: App-Paket prüfen
+        run: |
+          APP=macos/build/WipeKit.app
+          lipo -archs "$APP/Contents/MacOS/WipeKit"
+          lipo -archs "$APP/Contents/MacOS/smartctl"
+          "$APP/Contents/MacOS/smartctl" --version | head -2
+          ls "$APP/Contents/Resources" "$APP/Contents/Resources/Lizenzen"
+          codesign --verify --deep --strict "$APP" && echo "Signatur in Ordnung"
+
+      - name: Diagnose testen (echte Laufwerke des Testrechners)
+        run: |
+          for d in $(diskutil list -plist physical | plutil -extract WholeDisks json -o - - | python3 -c "import json,sys;print(' '.join(json.load(sys.stdin)))"); do
+            macos/build/WipeKit.app/Contents/MacOS/smartctl -x -j "/dev/$d" > "$RUNNER_TEMP/$d.json" || true
+            python3 - "$RUNNER_TEMP/$d.json" "$d" <<'PY'
+          import sys
+          sys.path.insert(0, "linux/wipekit")
+          import health
+          h = health.parse_text(open(sys.argv[1]).read())
+          print(sys.argv[2], "->", h.rating, "|", h.model or "-", "|", h.reason or "; ".join(h.reasons))
+          PY
+          done
+
+      - name: Oberfläche prüfen (Beispieldaten, Bildschirmfotos, Berichte)
+        env:
+          WIPEKIT_SHOTS: ${{ github.workspace }}/screenshots
+          WIPEKIT_REPORTS: ${{ github.workspace }}/screenshots/berichte
+          WIPEKIT_FIXTURES: ${{ github.workspace }}/tests/fixtures
+        run: |
+          macos/build/WipeKit.app/Contents/MacOS/WipeKit --smoke-test
+          ls -la screenshots screenshots/berichte/PDF
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: Screenshots-macOS
+          path: screenshots/
+          if-no-files-found: ignore
+
+      - name: Echtes Löschen und Prüfen testen (eingehängtes Disk-Image, als root)
         run: |
           hdiutil create -size 48m -fs HFS+ -volname WKTEST -o "$RUNNER_TEMP/wk.dmg"
           DEV=$(hdiutil attach "$RUNNER_TEMP/wk.dmg" | head -1 | awk '{print $1}' | sed 's#/dev/##')
           echo "Disk-Image: $DEV"; diskutil list "$DEV"
-          BASE="/private/tmp/WipeKit-$(id -u)"; JOB="$BASE/ci-test"
-          mkdir -p "$JOB"; chmod 700 "$BASE" "$JOB"
-          sudo macos/build/WipeKit.app/Contents/MacOS/WipeKit --wipe-helper --disk "$DEV" --mode ssd --job-dir "$JOB" --allow-disk-image
-          STATE=none
-          for i in $(seq 1 90); do
-            STATE=$(python3 -c "import json;print(json.load(open('$JOB/status.json'))['state'])" 2>/dev/null || echo none)
-            case "$STATE" in done|failed|cancelled) break;; esac
-            sleep 2
-          done
-          echo "--- status.json"; cat "$JOB/status.json" || true
-          echo; echo "--- helper.log"; cat "$JOB/helper.log" || true
+          BASE="/private/tmp/WipeKit-$(id -u)"; mkdir -p "$BASE"; chmod 700 "$BASE"
+          run() {
+            JOB="$BASE/ci-$1"; mkdir -p "$JOB"; chmod 700 "$JOB"
+            sudo macos/build/WipeKit.app/Contents/MacOS/WipeKit --wipe-helper --disk "$DEV" --mode "$1" --job-dir "$JOB" --allow-disk-image
+            STATE=none
+            for i in $(seq 1 90); do
+              STATE=$(python3 -c "import json;print(json.load(open('$JOB/status.json'))['state'])" 2>/dev/null || echo none)
+              case "$STATE" in done|failed|cancelled) break;; esac
+              sleep 2
+            done
+            echo "--- $1: status.json"; cat "$JOB/status.json" || true
+            echo; echo "--- helper.log"; cat "$JOB/helper.log" || true
+            python3 -c "import json,sys; s=json.load(open('$JOB/status.json')); sys.exit(0 if s['state']=='done' and s.get('verified') else 1)"
+          }
+          run ssd
+          run quick
+          run secure
+          run check
           hdiutil detach "/dev/$DEV" -force || true
-          test "$STATE" = "done"
 
-      - name: ZIP erstellen
+      - name: Bildschirmfotos ins Protokoll schreiben
+        if: contains(github.event.head_commit.message, '[screenshots]')
+        run: |
+          for f in screenshots/*.png; do
+            sips -Z 1400 "$f" --out "$RUNNER_TEMP/s.png" >/dev/null
+            echo "===BEGIN $(basename "$f")==="; base64 -i "$RUNNER_TEMP/s.png" | tr -d '\n'; echo; echo "===END==="
+          done
+
+      - name: ZIP und Quelltext von smartmontools bereitstellen
         run: |
           mkdir -p dist
           ditto -c -k --keepParent macos/build/WipeKit.app "dist/WipeKit-macOS-${VERSION}.zip"
+          cp macos/vendor/smartmontools-7.5.tar.gz dist/
 
       - uses: actions/upload-artifact@v7
         with:

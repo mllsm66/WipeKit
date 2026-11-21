@@ -83,9 +83,9 @@ enum DiskService {
         return result
     }
 
-    /// Entspricht `diskutil list external physical` – plus Details für die Anzeige.
-    static func listExternalDisks() -> [ExternalDisk] {
-        guard let list = Shell.diskutilPlist(["list", "-plist", "external", "physical"]) else { return [] }
+    /// Alle physischen Laufwerke: externe (`diskutil list external physical`) und interne.
+    static func listDisks() -> [ExternalDisk] {
+        guard let list = Shell.diskutilPlist(["list", "-plist", "physical"]) else { return [] }
         let protected = protectedDisks()
 
         // APFS-Volumes gehören zu synthetischen Disks – über die Container den physischen Platten zuordnen
@@ -106,7 +106,8 @@ enum DiskService {
         for entry in list["AllDisksAndPartitions"] as? [[String: Any]] ?? [] {
             guard let id = entry["DeviceIdentifier"] as? String, isValidWholeDiskID(id) else { continue }
             let info = Shell.diskutilPlist(["info", "-plist", id]) ?? [:]
-            if (info["Internal"] as? Bool) == true { continue }
+            let isInternal = (info["Internal"] as? Bool) == true
+            if (info["VirtualOrPhysical"] as? String) == "Virtual" { continue }
 
             var volumes: [String] = []
             if let n = entry["VolumeName"] as? String, !n.isEmpty { volumes.append(n) }
@@ -122,6 +123,7 @@ enum DiskService {
                 ?? (info["Size"] as? NSNumber)?.uint64Value
                 ?? (entry["Size"] as? NSNumber)?.uint64Value
                 ?? 0
+            guard size > 0 else { continue }
 
             disks.append(ExternalDisk(
                 id: id,
@@ -130,11 +132,21 @@ enum DiskService {
                 bus: (info["BusProtocol"] as? String) ?? "?",
                 isSSD: info["SolidState"] as? Bool,
                 volumes: volumes,
-                isProtected: protected.contains(id)
+                isProtected: protected.contains(id),
+                isInternal: isInternal
             ))
         }
-        return disks.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+        // Apple-Silicon-Macs zeigen kleine Hilfsbereiche der internen SSD (iBoot, Recovery) als eigene
+        // „Laufwerke“ – das ist dieselbe SSD, daher ausblenden.
+        let big = Set(disks.filter { $0.isInternal && $0.size >= 16_000_000_000 }.map { $0.name })
+        disks.removeAll { $0.isInternal && $0.size < 16_000_000_000 && big.contains($0.name) }
+        return disks.sorted {
+            if $0.isInternal != $1.isInternal { return !$0.isInternal }
+            return $0.id.localizedStandardCompare($1.id) == .orderedAscending
+        }
     }
+
+    static func listExternalDisks() -> [ExternalDisk] { listDisks().filter { !$0.isInternal } }
 }
 
 // MARK: - Automatische Aktualisierung beim An-/Abstecken
