@@ -630,23 +630,23 @@ namespace WipeKit
                 objs[pid + 1] = ms.ToArray();
             }
             var outp = new MemoryStream();
-            void W(byte[] b) => outp.Write(b, 0, b.Length);
-            W(A("%PDF-1.4\n"));
-            W(new byte[] { 0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A });
+            void Put(byte[] b) => outp.Write(b, 0, b.Length);
+            Put(A("%PDF-1.4\n"));
+            Put(new byte[] { 0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A });
             int maxId = objs.Keys.Max();
             var offsets = new long[maxId + 1];
             for (int oid = 1; oid <= maxId; oid++)
             {
                 offsets[oid] = outp.Length;
-                W(A($"{oid} 0 obj\n"));
-                W(objs.TryGetValue(oid, out var b) ? b : A("null"));
-                W(A("\nendobj\n"));
+                Put(A($"{oid} 0 obj\n"));
+                Put(objs.TryGetValue(oid, out var b) ? b : A("null"));
+                Put(A("\nendobj\n"));
             }
             long xref = outp.Length;
             var sb = new StringBuilder($"xref\n0 {maxId + 1}\n0000000000 65535 f \n");
             for (int oid = 1; oid <= maxId; oid++) sb.Append(offsets[oid].ToString("D10")).Append(" 00000 n \n");
             sb.Append($"trailer\n<< /Size {maxId + 1} /Root 1 0 R /Info 6 0 R >>\nstartxref\n{xref}\n%%EOF\n");
-            W(A(sb.ToString()));
+            Put(A(sb.ToString()));
             return outp.ToArray();
         }
     }

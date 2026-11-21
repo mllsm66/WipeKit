@@ -322,8 +322,8 @@ namespace WipeKit
             h.SupportsConveyance = Bool(Get(caps, "conveyance_self_test_supported")) == true;
             h.ShortMinutes = Num(Get(Get(st, "polling_minutes"), "short"));
             h.LongMinutes = Num(Get(Get(st, "polling_minutes"), "extended"));
-            var status = Get(st, "status");
-            if (Num(Get(status, "value")) is long sv && (sv >> 4) == 0xF) h.SelfTestRemaining = Num(Get(status, "remaining_percent")) ?? 100;
+            var testStatus = Get(st, "status");
+            if (Num(Get(testStatus, "value")) is long sv && (sv >> 4) == 0xF) h.SelfTestRemaining = Num(Get(testStatus, "remaining_percent")) ?? 100;
             foreach (var e in Arr(Get(Get(Get(j, "ata_smart_self_test_log"), "standard"), "table")).Take(20))
                 h.SelfTests.Add(new SelfTestEntry
                 {
