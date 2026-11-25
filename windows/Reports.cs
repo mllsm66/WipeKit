@@ -78,6 +78,8 @@ namespace WipeKit
         public int? BadBlocks;
         public long? NonZero;
         public string PurgeMethod = "";
+        /// <summary>„Durchgeführt von“, „Firma / Organisation“, „Notiz“ (aus den Einstellungen)</summary>
+        public List<(string, string)> Meta = new List<(string, string)>();
     }
 
     public static class Reports
@@ -137,12 +139,12 @@ namespace WipeKit
             return sb.ToString().TrimEnd('-');
         }
 
-        public static string BaseName(ReportIdentity i, DateTime when)
+        public static string BaseName(ReportIdentity i, DateTime when, bool serial = true)
         {
             var parts = new[]
             {
                 Slug(i.Vendor == "Unbekannt" ? "" : i.Vendor), Slug(i.Model),
-                i.Size > 0 ? Math.Round(i.Size / 1e9).ToString("0", CultureInfo.InvariantCulture) + "GB" : "", Slug(i.Serial),
+                i.Size > 0 ? Math.Round(i.Size / 1e9).ToString("0", CultureInfo.InvariantCulture) + "GB" : "", serial ? Slug(i.Serial) : "",
             };
             string name = string.Join("-", parts.Where(p => p != ""));
             if (name == "") name = "LAUFWERK";
@@ -156,7 +158,7 @@ namespace WipeKit
             {
                 string env = Environment.GetEnvironmentVariable("WIPEKIT_REPORTS");
                 if (!string.IsNullOrEmpty(env)) return env;
-                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "WipeKit-Protokolle");
+                return AppSettings.Current.ReportsFolder;
             }
         }
 
@@ -166,7 +168,7 @@ namespace WipeKit
             string pdfDir = Path.Combine(Folder, "PDF"), txtDir = Path.Combine(Folder, "Text");
             Directory.CreateDirectory(pdfDir);
             Directory.CreateDirectory(txtDir);
-            string name = BaseName(r.Identity, r.Created) + "_" + r.Kind.Suffix;
+            string name = BaseName(r.Identity, r.Created, AppSettings.Current.SerialInFileName) + "_" + r.Kind.Suffix;
             string pdf = Unique(Path.Combine(pdfDir, name + ".pdf"));
             string txt = Unique(Path.Combine(txtDir, name + ".txt"));
             File.WriteAllBytes(pdf, RenderPdf(r));
@@ -234,7 +236,8 @@ namespace WipeKit
 
         static string Note(Health h) => h == null ? "" : h.Available ? h.Reasons.FirstOrDefault() ?? "" : h.Reason;
 
-        public static Report HealthReport(Health h, ReportIdentity ident, string appVersion, string platform, string host)
+        public static Report HealthReport(Health h, ReportIdentity ident, string appVersion, string platform, string host,
+                                          List<(string, string)> meta = null)
         {
             var r = new Report
             {
@@ -246,7 +249,7 @@ namespace WipeKit
             {
                 ("Erstellt", Dt(r.Created, true)), ("Rechner", host == "" ? "–" : host),
                 ("System", platform == "" ? "–" : platform), ("Programm", "WipeKit " + appVersion),
-            })));
+            }.Concat(meta ?? new List<(string, string)>()).ToList())));
             r.Footer = "WipeKit " + appVersion;
             return r;
         }
@@ -347,7 +350,8 @@ namespace WipeKit
             if (compact)
             {
                 string line = $"Erstellt am {Dt(r.Created, true)} auf »{(w.Host == "" ? "–" : w.Host)}« ({(w.Platform == "" ? "–" : w.Platform)}) mit WipeKit {w.AppVersion}.";
-                r.Sections.Add(new ReportSection("Protokoll", Txt(line + " " + NotCertified)));
+                if (w.Meta.Count > 0) r.Sections.Add(new ReportSection("Protokoll", Kv(w.Meta), Txt(line + " " + NotCertified)));
+                else r.Sections.Add(new ReportSection("Protokoll", Txt(line + " " + NotCertified)));
             }
             else
             {
@@ -355,7 +359,7 @@ namespace WipeKit
                 {
                     ("Erstellt", Dt(r.Created, true)), ("Rechner", w.Host == "" ? "–" : w.Host),
                     ("System", w.Platform == "" ? "–" : w.Platform), ("Programm", "WipeKit " + w.AppVersion),
-                }), Txt(NotCertified)));
+                }.Concat(w.Meta).ToList()), Txt(NotCertified)));
             }
             r.Footer = "WipeKit " + w.AppVersion;
             return r;

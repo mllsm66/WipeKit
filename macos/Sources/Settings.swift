@@ -37,8 +37,9 @@ final class AppSettings: ObservableObject {
     }
 
     private init() {
-        func bool(_ k: String, _ def: Bool) -> Bool { d.object(forKey: k) == nil ? def : d.bool(forKey: k) }
-        func str(_ k: String, _ def: String = "") -> String { d.string(forKey: k) ?? def }
+        let ud = UserDefaults.standard
+        func bool(_ k: String, _ def: Bool) -> Bool { ud.object(forKey: k) == nil ? def : ud.bool(forKey: k) }
+        func str(_ k: String, _ def: String = "") -> String { ud.string(forKey: k) ?? def }
         notifyLocal = bool("notifyLocal", true)
         playSound = bool("playSound", true)
         defaultMode = WipeMode(rawValue: str("defaultMode", "secure")).flatMap { $0.availableOnMac ? $0 : nil } ?? .secure

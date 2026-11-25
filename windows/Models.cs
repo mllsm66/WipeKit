@@ -118,7 +118,7 @@ namespace WipeKit
             },
         };
 
-        public static WipeMode ByKey(string key) => All.First(m => m.Key == key);
+        public static WipeMode ByKey(string key) => All.FirstOrDefault(m => m.Key == key) ?? All.First(m => m.Key == "secure");
 
         public static WipeMode Recommended(DiskInfo d) => d.IsSsd == true ? ByKey("ssd") : ByKey("secure");
 

@@ -46,7 +46,7 @@ namespace WipeKit
         string _selKind;     // "disk" | "job"
         string _selId;
         string _view = "wipe";   // "wipe" | "diag"
-        WipeMode _mode = WipeMode.ByKey("secure");
+        WipeMode _mode = WipeMode.ByKey(AppSettings.Current.DefaultMode) ?? WipeMode.ByKey("secure");
         string _diskSignature = "";
         bool _updatingLists;
         bool _refreshing;
@@ -103,6 +103,11 @@ namespace WipeKit
             info.Click += (s, e) => ShowAbout();
             DockPanel.SetDock(info, Dock.Right);
             header.Children.Add(info);
+            var gear = IconButton("\uE713", "Einstellungen (Strg+,)");
+            gear.Margin = new Thickness(4, 0, 0, 0);
+            gear.Click += (s, e) => ShowSettings();
+            DockPanel.SetDock(gear, Dock.Right);
+            header.Children.Add(gear);
             var folder = IconButton("", "Ordner mit Protokollen und Berichten öffnen (Strg+O)");
             folder.Margin = new Thickness(0, 0, 4, 0);
             folder.Click += (s, e) => OpenReportsFolder();
@@ -186,6 +191,7 @@ namespace WipeKit
             AddShortcut(Key.F5, ModifierKeys.None, () => { RefreshDisks(true); ReadAllHealth(true); });
             AddShortcut(Key.S, ModifierKeys.Control, () => { if (_selKind == "disk" && FindDisk(_selId) is DiskInfo d) SaveHealthReport(d); });
             AddShortcut(Key.O, ModifierKeys.Control, OpenReportsFolder);
+            AddShortcut(Key.OemComma, ModifierKeys.Control, () => ShowSettings());
 
             _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             _timer.Tick += (s, e) => Tick();
@@ -203,7 +209,44 @@ namespace WipeKit
             if (_smoke)
                 Loaded += (s, e) => Dispatcher.BeginInvoke(new Action(RunSmokeTest), DispatcherPriority.ApplicationIdle);
             else
+            {
                 RefreshDisks(true);
+                Loaded += (s, e) => Dispatcher.BeginInvoke(new Action(UpdatesOnLaunch), DispatcherPriority.ApplicationIdle);
+            }
+            Closed += (s, e) => Notifier.Dispose();
+        }
+
+        void ShowSettings(int tab = 0)
+        {
+            new SettingsWindow(this, () => _jobs.Any(j => j.IsActive), tab).ShowDialog();
+        }
+
+        /// <summary>Erster Start: fragen; danach ggf. automatisch suchen und installieren</summary>
+        async void UpdatesOnLaunch()
+        {
+            var s = AppSettings.Current;
+            if (!s.UpdatesAsked)
+            {
+                s.UpdatesAsked = true;
+                var a = MessageBox.Show(this, "WipeKit kann bei jedem Start auf GitHub nach einer neuen Version suchen und sie installieren. " +
+                    "Updates werden vorher anhand ihrer Signatur geprüft. Das lässt sich jederzeit in den Einstellungen ändern.\n\n" +
+                    "Ja = automatisch suchen und installieren\nNein = nicht automatisch suchen",
+                    "Automatisch nach Updates suchen?", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                s.AutoCheck = s.AutoInstall = a == MessageBoxResult.Yes;
+                s.Save();
+            }
+            if (!s.AutoCheck) return;
+            var r = await Updater.Check();
+            if (r == null) return;
+            if (!s.AutoInstall || !Updater.CanInstall(r))
+            {
+                Notifier.Show("Update verfügbar", $"WipeKit {r.Version} ist verfügbar. Einstellungen › Updates.", false);
+                return;
+            }
+            while (_jobs.Any(j => j.IsActive)) await System.Threading.Tasks.Task.Delay(TimeSpan.FromMinutes(1));
+            string err = await Updater.Install(r);
+            if (err == null) Application.Current.Shutdown();
+            else Notifier.Show("Update fehlgeschlagen", err, true);
         }
 
         void AddShortcut(Key key, ModifierKeys mods, Action action)
@@ -743,7 +786,8 @@ namespace WipeKit
                 if (d != null)
                 {
                     if (d.IsSsd == true) _mode = WipeMode.ByKey("ssd");
-                    else if (_mode.Key == "ssd" || _mode.Key == "purge") _mode = WipeMode.ByKey("secure");
+                    else if (_mode.Key == "ssd" || _mode.Key == "purge")
+                        _mode = WipeMode.ByKey(AppSettings.Current.DefaultMode is "ssd" or "purge" ? "secure" : AppSettings.Current.DefaultMode) ?? WipeMode.ByKey("secure");
                     if (_view == "diag") EnsureHealth(d);
                 }
             }
@@ -1342,7 +1386,7 @@ namespace WipeKit
             try
             {
                 var ident = Reports.Identity(h, d.Name, d.Size, d.Serial);
-                var r = Reports.HealthReport(h, ident, AppVersion, OsLabel, Environment.MachineName);
+                var r = Reports.HealthReport(h, ident, AppVersion, OsLabel, Environment.MachineName, AppSettings.Current.ReportMeta);
                 var (pdf, _) = Reports.Save(r);
                 if (!_smoke) OpenFile(pdf);
             }
@@ -1677,8 +1721,89 @@ namespace WipeKit
                 image = MessageBoxImage.Error;
             }
             if (_smoke) return;
-            if (j.State == JobState.Done && !j.FoundProblem) SystemSounds.Asterisk.Play(); else SystemSounds.Hand.Play();
+            var settings = AppSettings.Current;
+            var before = string.IsNullOrEmpty(j.HealthBefore) ? null : HealthParser.ParseText(j.HealthBefore);
+            var after = string.IsNullOrEmpty(j.HealthAfter) ? null : HealthParser.ParseText(j.HealthAfter);
+            var health = after != null && after.Available ? after : before;
+            bool warning = health != null && health.Available && (health.Rating == Rating.Bad || health.Rating == Rating.Caution);
+            string notice = Notice(j, health, warning);
+            if (settings.PlaySound)
+            {
+                if (j.State == JobState.Done && !j.FoundProblem && !warning) SystemSounds.Asterisk.Play(); else SystemSounds.Hand.Play();
+            }
+            if (settings.NotifyLocal) Notifier.Show(title, notice, j.State != JobState.Done || warning);
+            if (settings.Push.Service != "off")
+            {
+                var ev = new PushEvent
+                {
+                    Kind = j.IsCheck ? "check" : "wipe",
+                    State = j.State == JobState.Done ? "done" : j.State == JobState.Cancelled ? "cancelled" : "failed",
+                    Warning = warning, Notice = notice, Meta = HubMeta(j, health),
+                };
+                foreach (var key in new[] { "pdf", "pdf_full" })
+                    if (j.Reports != null && j.Reports.TryGetValue(key, out var path) && File.Exists(path))
+                        ev.Files.Add((Path.GetFileName(path), File.ReadAllBytes(path)));
+                var cfg = settings.Push;
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    string err = Push.Send(cfg, ev);
+                    if (err != null) Dispatcher.BeginInvoke(new Action(() => Notifier.Show("Benachrichtigung aufs Handy fehlgeschlagen", err, true)));
+                });
+            }
             Dispatcher.BeginInvoke(new Action(() => MessageBox.Show(this, text, title, MessageBoxButton.OK, image)));
+        }
+
+        /// <summary>Kurze Mitteilung (für Handy und Info-Center)</summary>
+        static string Notice(WipeJob j, Health health, bool warning)
+        {
+            var d = j.Disk;
+            var ident = Reports.Identity(health, d.Name, d.Size, d.Serial);
+            string label = string.Join(" ", new[] { ident.Vendor == "Unbekannt" ? "" : ident.Vendor, ident.Model }.Where(x => x != ""));
+            string what = $"{(label == "" ? d.Name : label)} ({Fmt.Bytes(d.Size)})";
+            string body;
+            if (j.State == JobState.Done)
+            {
+                if (j.IsCheck)
+                    body = j.BadBlocks > 0 ? $"{what}: {j.BadBlocks} unlesbare Bereiche gefunden"
+                         : $"{what}: " + (j.NonZeroBytes == 0 ? "Laufwerk ist leer" : (j.Title == "Oberflächentest" ? "Oberflächentest bestanden" : "Laufwerk enthält Daten"));
+                else body = $"{what}: erfolgreich gelöscht";
+            }
+            else if (j.State == JobState.Cancelled) body = $"{what}: {j.Title} abgebrochen";
+            else
+            {
+                string m = j.Message ?? "";
+                body = $"{what}: {j.Title} fehlgeschlagen" + (m == "" ? "" : " – " + (m.Length > 120 ? m.Substring(0, 120) : m));
+            }
+            if (warning) body += " · Gesundheit: " + HealthParser.RatingText(health.Rating);
+            return body;
+        }
+
+        static Dictionary<string, object> HubMeta(WipeJob j, Health health)
+        {
+            var d = j.Disk;
+            var ident = Reports.Identity(health, d.Name, d.Size, d.Serial);
+            string type = "unknown";
+            if (health != null && health.Available)
+                type = health.Protocol == "NVMe" ? "nvme" : health.IsSsd == true ? "ssd" : health.IsSsd == false ? "hdd" : "unknown";
+            else if (d.IsSsd == true) type = "ssd";
+            else if (d.IsSsd == false) type = "hdd";
+            if (type == "unknown" && d.Bus == "USB" && d.Size < 600_000_000_000) type = "usb";
+            var started = j.StartedAt;
+            var ended = j.FinishedAt ?? DateTime.Now;
+            var m = new Dictionary<string, object>
+            {
+                ["vendor"] = ident.Vendor, ["model"] = ident.Model, ["serial"] = ident.Serial, ["size"] = d.Size, ["type"] = type,
+                ["mode"] = j.IsCheck ? j.Title : j.Mode.Title, ["method"] = j.Mode.MethodDescription,
+                ["result"] = j.State == JobState.Done ? (j.IsCheck ? "Abgeschlossen" : "Erfolgreich gelöscht")
+                           : j.State == JobState.Cancelled ? "Abgebrochen" : "Fehlgeschlagen",
+                ["rating"] = health != null ? HealthParser.RatingText(health.Rating) : "Unbekannt",
+                ["started"] = started.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ["ended"] = ended.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ["duration"] = (int)Math.Max(0, (ended - started).TotalSeconds),
+                ["host"] = Environment.MachineName, ["platform"] = OsLabel, ["app"] = AppVersion,
+            };
+            if (j.State != JobState.Done && !string.IsNullOrEmpty(j.Message)) m["message"] = j.Message;
+            return m;
         }
 
         Dictionary<string, string> WriteReports(WipeJob j)
@@ -1708,7 +1833,7 @@ namespace WipeKit
                     Volumes = d.Volumes, ExactSize = j.DiskSize > 0 ? j.DiskSize : d.Size,
                     Host = Environment.MachineName, Platform = OsLabel, AppVersion = AppVersion,
                     ReadOnly = j.IsCheck, BadBlocks = j.IsCheck ? j.BadBlocks : null, NonZero = j.IsCheck ? j.NonZeroBytes : null,
-                    PurgeMethod = j.PurgeMethod ?? "",
+                    PurgeMethod = j.PurgeMethod ?? "", Meta = AppSettings.Current.ReportMeta,
                 };
                 var ident = Reports.Identity(before ?? after, d.Name, d.Size, d.Serial);
                 if (j.IsCheck)
@@ -1720,8 +1845,11 @@ namespace WipeKit
                 {
                     var (pdf, txt) = Reports.Save(Reports.WipeReport(w, ident, before, after, false));
                     result["pdf"] = pdf; result["txt"] = txt; result["title"] = "Löschprotokoll";
-                    var (pdf2, txt2) = Reports.Save(Reports.WipeReport(w, ident, before, after, true));
-                    result["pdf_full"] = pdf2; result["txt_full"] = txt2;
+                    if (AppSettings.Current.DetailedReport)
+                    {
+                        var (pdf2, txt2) = Reports.Save(Reports.WipeReport(w, ident, before, after, true));
+                        result["pdf_full"] = pdf2; result["txt_full"] = txt2;
+                    }
                 }
             }
             catch (Exception ex)

@@ -47,3 +47,5 @@ Name: "{autodesktop}\WipeKit"; Filename: "{app}\WipeKit.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\WipeKit.exe"; Description: "{cm:LaunchProgram,WipeKit}"; Flags: nowait postinstall skipifsilent shellexec
+; Nach einem Update aus WipeKit heraus (stille Installation) direkt wieder starten
+Filename: "{app}\WipeKit.exe"; Flags: nowait shellexec; Check: WizardSilent

@@ -4,6 +4,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>WipeKit</AssemblyName>
     <RootNamespace>WipeKit</RootNamespace>
@@ -27,6 +28,8 @@
     <EmbeddedResource Include="..\licenses\GPL-2.0.txt" LogicalName="WipeKit.GPL-2.0.txt" />
     <!-- smartctl.exe aus smartmontools 7.5 (GPL-2.0-or-later), wird im Build von GitHub nach vendor\ geladen -->
     <EmbeddedResource Include="vendor\smartctl.exe" LogicalName="WipeKit.smartctl.exe" Condition="Exists('vendor\smartctl.exe')" />
+    <!-- Öffentlicher Schlüssel für die Prüfung von Updates (im Build aus dem Signaturschlüssel abgeleitet) -->
+    <EmbeddedResource Include="vendor\update-public-key.pem" LogicalName="WipeKit.update-public-key.pem" Condition="Exists('vendor\update-public-key.pem')" />
   </ItemGroup>
 
 </Project>

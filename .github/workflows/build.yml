@@ -182,6 +182,15 @@ jobs:
           Copy-Item $found windows\vendor\smartctl.exe
           & windows\vendor\smartctl.exe --version | Select-Object -First 2
 
+      - name: Update-Schlüssel einbauen (öffentlicher Teil)
+        shell: bash
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then echo "Kein Signaturschlüssel – Updates nur über die GitHub-Seite."; exit 0; fi
+          printf '%s\n' "$UPDATE_SIGNING_KEY" | openssl ec -pubout -out windows/vendor/update-public-key.pem
+          cat windows/vendor/update-public-key.pem
+
       - name: Portable EXE bauen
         shell: bash
         run: >
@@ -286,10 +295,20 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$env:VERSION" windows\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup fehlgeschlagen" }
 
-      - name: Dateien benennen
+      - name: Dateien benennen und Update signieren
         shell: bash
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
           cp dist/win/WipeKit.exe "dist/WipeKit-Windows-Portable-${VERSION}.exe"
+          if [ -n "$UPDATE_SIGNING_KEY" ]; then
+            umask 077; printf '%s\n' "$UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/k.pem"
+            for f in dist/WipeKit-Windows-Setup-*.exe; do
+              openssl dgst -sha256 -sign "$RUNNER_TEMP/k.pem" -out "$f.sig" "$f"
+              openssl dgst -sha256 -verify windows/vendor/update-public-key.pem -signature "$f.sig" "$f"
+            done
+            rm -f "$RUNNER_TEMP/k.pem"
+          fi
           ls -la dist
 
       - uses: actions/upload-artifact@v7
@@ -298,13 +317,14 @@ jobs:
           path: |
             dist/WipeKit-Windows-Portable-*.exe
             dist/WipeKit-Windows-Setup-*.exe
+            dist/WipeKit-Windows-Setup-*.exe.sig
 
       - name: An Release anhängen
         if: github.event_name == 'release'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/WipeKit-Windows-Portable-*.exe dist/WipeKit-Windows-Setup-*.exe --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/WipeKit-Windows-Portable-*.exe dist/WipeKit-Windows-Setup-*.exe dist/WipeKit-Windows-Setup-*.exe.sig --clobber
 
   linux:
     name: Linux
