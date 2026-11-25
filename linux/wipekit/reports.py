@@ -175,6 +175,16 @@ def fmt_dt_sec(ts) -> str:
     return datetime.fromtimestamp(ts).strftime("%d.%m.%Y, %H:%M:%S Uhr") if ts else "–"
 
 
+def fmt_period(a, b) -> str:
+    """„22.11.2026, 21:15 – 22:55 Uhr“ (über Mitternacht mit beiden Daten)"""
+    if not a or not b:
+        return "–"
+    da, db = datetime.fromtimestamp(a), datetime.fromtimestamp(b)
+    if da.date() == db.date():
+        return f"{da:%d.%m.%Y, %H:%M} – {db:%H:%M} Uhr"
+    return f"{da:%d.%m.%Y, %H:%M} – {db:%d.%m.%Y, %H:%M} Uhr"
+
+
 def fmt_duration(t) -> str:
     s = int(round(max(0, t or 0)))
     h, m, sec = s // 3600, (s % 3600) // 60, s % 60
@@ -264,11 +274,19 @@ def wipe_report(w: WipeInfo, ident: Identity, before=None, after=None, detailed=
                banner=(result, color))
     duration = max(0.0, (w.ended or 0) - (w.started or 0))
     avg = w.bytes_written / duration if duration > 0 else 0
-    rows = [("Ergebnis", result), ("Methode", w.mode_title), ("Ablauf", w.method), ("Vorgehen orientiert an", w.standard)]
+    # Das kurze Protokoll passt auf eine Seite: Ergebnis steht schon im Banner, Zeiten in einer Zeile
+    compact = not detailed and not w.read_only
+    speed = hl.fmt_bytes(avg) + "/s" if avg and not w.purge_method else "–"
+    rows = [] if compact else [("Ergebnis", result)]
+    rows += [("Methode", w.mode_title), ("Ablauf", w.method), ("Vorgehen orientiert an", w.standard)]
     if w.purge_method:
         rows.append(("Firmware-Befehl", w.purge_method))
-    rows += [("Beginn", fmt_dt_sec(w.started)), ("Ende", fmt_dt_sec(w.ended)), ("Dauer", fmt_duration(duration)),
-             ("Ø Geschwindigkeit", hl.fmt_bytes(avg) + "/s" if avg and not w.purge_method else "–")]
+    if compact:
+        rows += [("Zeitraum", fmt_period(w.started, w.ended)),
+                 ("Dauer", fmt_duration(duration) + ("" if speed == "–" else f" (Ø {speed})"))]
+    else:
+        rows += [("Beginn", fmt_dt_sec(w.started)), ("Ende", fmt_dt_sec(w.ended)), ("Dauer", fmt_duration(duration)),
+                 ("Ø Geschwindigkeit", speed)]
     if w.read_only:
         if w.non_zero is not None:
             rows.append(("Inhalt", "leer – alle Sektoren enthalten Nullen" if w.non_zero == 0 else
@@ -281,7 +299,7 @@ def wipe_report(w: WipeInfo, ident: Identity, before=None, after=None, detailed=
         rows.append(("TRIM", w.trim))
     if w.hidden_area:
         rows.append(("Versteckte Bereiche", w.hidden_area))
-    if w.message:
+    if w.message and not (compact and w.state == "done"):
         rows.append(("Meldung", w.message))
     r.sections.append(Section("Prüfung" if w.read_only else "Löschvorgang", [("kv", rows)]))
     r.sections.append(Section("Laufwerk", [("kv", [
@@ -303,9 +321,14 @@ def wipe_report(w: WipeInfo, ident: Identity, before=None, after=None, detailed=
                 if s.title == "Laufwerk":
                     s.title = "Laufwerksdaten"
             r.sections += secs
-    r.sections.append(Section("Protokoll", [("kv", [
-        ("Erstellt", fmt_dt_sec(r.created)), ("Rechner", w.host or "–"), ("System", w.platform or "–"),
-        ("Programm", f"WipeKit {w.app_version}".strip())]), ("text", NOT_CERTIFIED)]))
+    if compact:
+        line = (f"Erstellt am {fmt_dt_sec(r.created)} auf »{w.host or '–'}« ({w.platform or '–'}) "
+                f"mit WipeKit {w.app_version}.".replace("  ", " "))
+        r.sections.append(Section("Protokoll", [("text", line + " " + NOT_CERTIFIED)]))
+    else:
+        r.sections.append(Section("Protokoll", [("kv", [
+            ("Erstellt", fmt_dt_sec(r.created)), ("Rechner", w.host or "–"), ("System", w.platform or "–"),
+            ("Programm", f"WipeKit {w.app_version}".strip())]), ("text", NOT_CERTIFIED)]))
     r.footer = f"WipeKit {w.app_version}".strip()
     return r
 

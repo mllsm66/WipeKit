@@ -138,6 +138,12 @@ extension WipeJob {
         }
     }
 
+    /// Für den Verlauf: Ergebnis und wann
+    var historyStatus: String {
+        guard let end = status?.finishedAt else { return shortStatus }
+        return "\(shortStatus) · \(Fmt.relativeDay(end))"
+    }
+
     var shortStatus: String {
         switch state {
         case .starting:  return "Wird gestartet …"
@@ -174,6 +180,8 @@ struct RootView: View {
 
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
+    @State private var showAllHistory = false
+    private let historyLimit = 6
 
     var body: some View {
         List(selection: $model.selection) {
@@ -198,11 +206,29 @@ struct SidebarView: View {
                     }
                 }
             }
-            if !model.jobs.isEmpty {
-                Section("Vorgänge") {
-                    ForEach(model.jobs) { job in
+            let running = model.jobs.filter { $0.state.isActive }
+            if !running.isEmpty {
+                Section("Läuft") {
+                    ForEach(running) { job in
                         JobSidebarRow(job: job)
                             .tag(SidebarItem.job(job.id))
+                    }
+                }
+            }
+            let finished = model.jobs.filter { !$0.state.isActive }
+            if !finished.isEmpty {
+                Section("Verlauf") {
+                    ForEach(showAllHistory ? finished : Array(finished.prefix(historyLimit))) { job in
+                        JobSidebarRow(job: job)
+                            .tag(SidebarItem.job(job.id))
+                    }
+                    if finished.count > historyLimit {
+                        Button(showAllHistory ? "Weniger anzeigen" : "Alle \(finished.count) anzeigen") {
+                            showAllHistory.toggle()
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .padding(.leading, 34)
                     }
                 }
             }
@@ -272,7 +298,7 @@ struct JobSidebarRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(job.kind == .wipe ? job.info.disk.name : "\(job.title) · \(job.info.disk.name)")
                     .lineLimit(1)
-                Text(job.shortStatus)
+                Text(job.state.isActive ? job.shortStatus : job.historyStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -722,7 +748,7 @@ struct DiagnoseView: View {
                 DiskHeader(disk: disk)
             }
             if let h = entry.health {
-                overview(h)
+                if h.available { overview(h) }
                 if h.available {
                     Section("Bewertung") {
                         ForEach(h.reasons, id: \.self) { r in
@@ -799,9 +825,11 @@ struct DiagnoseView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Aktualisieren") { model.ensureHealth(disk, force: true) }
+                Button("Aktualisieren") {
+                    if entry.health?.usbTried == true { model.readHealthAsAdmin(disk) } else { model.ensureHealth(disk, force: true) }
+                }
                     .controlSize(.large)
-                    .disabled(entry.loading)
+                    .disabled(entry.loading || model.isBusy(disk))
                 Button("Bericht speichern") { model.saveHealthReport(disk) }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
@@ -842,45 +870,59 @@ struct DiagnoseView: View {
     }
 
     @ViewBuilder private func unavailable(_ h: Health) -> some View {
+        let usb = disk.bus == "USB"
         Section {
-            HStack(alignment: .firstTextBaseline) {
-                Text(h.reason.isEmpty ? "Für dieses Laufwerk sind keine Gesundheitsdaten verfügbar." : h.reason)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Button("Mit Administratorrechten lesen") { model.readHealthAsAdmin(disk) }
-                    .help("Manche Laufwerke antworten nur mit Administratorrechten.")
-            }
-            if !disk.isInternal {
-                Text(MacInfo.usbExplanation)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                ForEach(Array(MacInfo.usbWays.enumerated()), id: \.offset) { _, way in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(way.0).font(.body.weight(.medium))
-                        Text(way.1)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+            if entry.loading {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(usb ? "Wird über den USB-Adapter gelesen …" : "Gesundheitsdaten werden gelesen …")
+                        if usb {
+                            Text("Das Laufwerk ist dabei kurz ausgeworfen. Das dauert meist unter einer Minute.")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 2)
+                }
+                .padding(.vertical, 2)
+            } else if usb && !h.usbTried {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("macOS gibt die Gesundheitsdaten von USB-Laufwerken nicht an Programme weiter. WipeKit kann sie direkt über den USB-Adapter lesen.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Dafür wird das Laufwerk kurz ausgeworfen und meldet sich danach wieder an. Daten werden nicht verändert.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                HStack {
+                    Spacer()
+                    Button("Über USB-Adapter lesen …") { model.readHealthAsAdmin(disk) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isBusy(disk))
+                        .help("Administrator-Passwort nötig")
+                }
+            } else {
+                Label {
+                    Text(h.reason.isEmpty ? "Für dieses Laufwerk sind keine Gesundheitsdaten verfügbar." : h.reason)
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+                if usb {
+                    Text("Adapter und Gehäuse mit Chips von ASMedia, JMicron oder Realtek geben die Daten meist weiter. Thunderbolt- und USB4-Gehäuse liefern sie immer.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
-                    Link("Infos zum SAT SMART Driver", destination: MacInfo.satDriverURL)
-                    Text("·").foregroundStyle(.secondary)
-                    Link("Quelltext (GitHub)", destination: MacInfo.satDriverSourceURL)
+                    Spacer()
+                    Button(usb ? "Erneut versuchen …" : "Mit Administratorrechten lesen") { model.readHealthAsAdmin(disk) }
+                        .disabled(model.isBusy(disk))
+                        .help("Administrator-Passwort nötig")
                 }
-                .font(.callout)
             }
         } header: {
-            Text("Keine Gesundheitsdaten")
-        } footer: {
-            if !disk.isInternal {
-                Text("WipeKit liefert den Treiber bewusst nicht mit: Er greift tief ins System ein. Nach der Installation zeigt WipeKit die Daten automatisch an.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text("Gesundheitsdaten")
         }
     }
 
@@ -896,7 +938,7 @@ struct DiagnoseView: View {
             } else if let m = entry.selfTestMessage {
                 LabeledContent("Letzter Selbsttest", value: m)
             }
-            if h.available && h.supportsSelfTests && h.proto != "NVMe" {
+            if h.available && h.supportsSelfTests && h.proto != "NVMe" && !h.usbTried {
                 testRow("Kurztest", "Elektronik und Teile der Oberfläche · ca. \(h.shortMinutes ?? 2) Min.") {
                     model.startSelfTest(disk, "short")
                 }
@@ -915,7 +957,9 @@ struct DiagnoseView: View {
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Keiner der Tests verändert Daten. Selbsttests führt das Laufwerk selbst aus.")
-                if h.proto == "NVMe" {
+                if h.usbTried && h.available {
+                    Text("Selbsttests sind über den USB-Direktzugriff nicht möglich – das Laufwerk müsste dafür minutenlang ausgeworfen bleiben.")
+                } else if h.proto == "NVMe" {
                     Text("Selbsttests von NVMe-SSDs gibt macOS für Programme nicht frei.")
                 }
             }

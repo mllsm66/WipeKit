@@ -227,6 +227,8 @@ struct HelperStatus: Codable {
     var nonZeroBytes: UInt64? = nil
     var badBlocks: Int? = nil
     var curve: [Double]? = nil
+    /// Kennung, falls sich das Laufwerk neu angemeldet hat (USB-Direktzugriff)
+    var diskNow: String? = nil
 }
 
 struct ExternalDisk: Identifiable, Hashable, Codable {
@@ -317,6 +319,16 @@ enum Fmt {
         if h > 0 { return "\(h) Std. \(m) Min." }
         if m > 0 { return "\(m) Min." }
         return "< 1 Min."
+    }
+
+    /// "14:05" (heute), "gestern", "Mo., 23.11."
+    static func relativeDay(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "de_DE")
+        if Calendar.current.isDateInToday(d) { f.dateFormat = "HH:mm"; return f.string(from: d) }
+        if Calendar.current.isDateInYesterday(d) { f.dateFormat = "'gestern,' HH:mm"; return f.string(from: d) }
+        f.dateFormat = "EE, dd.MM."
+        return f.string(from: d)
     }
 
     static func clock(_ d: Date) -> String {

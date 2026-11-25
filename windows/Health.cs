@@ -110,10 +110,10 @@ namespace WipeKit
 
         static readonly (string Pattern, string Vendor)[] Vendors =
         {
-            (@"^WDC\b", "Western Digital"), (@"^WD_?BLACK", "Western Digital"), (@"^WD\d", "Western Digital"),
+            (@"^WDC\b", "Western Digital"), (@"^WD_?BLACK", "Western Digital"), (@"^WD\d", "Western Digital"), (@"^WDS\d", "Western Digital"),
             (@"^WD\b", "Western Digital"), (@"^Western Digital", "Western Digital"), (@"^ST\d", "Seagate"),
             (@"^Seagate", "Seagate"), (@"^TOSHIBA", "Toshiba"), (@"^KIOXIA", "Kioxia"), (@"^HGST", "HGST"),
-            (@"^(HUS|HUH|HUA)", "HGST"), (@"^(Hitachi|HDS\d|HTS\d|HDT\d)", "Hitachi"), (@"^(SAMSUNG|Samsung)", "Samsung"),
+            (@"^(HUS|HUH|HUA)", "HGST"), (@"^(Hitachi|HDS\d|HTS\d|HDT\d)", "Hitachi"), (@"^(SAMSUNG|Samsung|MZ-|MZ7|MZV)", "Samsung"), (@"^HD\d{3}[A-Z]{1,2}J\b", "Samsung"),
             (@"^(Crucial|CT\d)", "Crucial"), (@"^(Micron|MTFD)", "Micron"), (@"^(INTEL|Intel|SSDSC|SSDPE)", "Intel"),
             (@"^(KINGSTON|Kingston|SA400|SKC|SNV|SUV)", "Kingston"), (@"^(SanDisk|SDSSD)", "SanDisk"),
             (@"^(SK ?hynix|HFS\d|HFM\d)", "SK hynix"), (@"^(ADATA|XPG)", "ADATA"), (@"^(Transcend|TS\d+G)", "Transcend"),

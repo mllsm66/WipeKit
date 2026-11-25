@@ -168,7 +168,7 @@ final class WipeEngine {
     /// Startwert für reproduzierbare Zufallsdaten (nur für die Prüfung, bleibt im Speicher)
     private let seed = UInt64.random(in: UInt64.min ... UInt64.max)
 
-    private let disk: String
+    private var disk: String
     private let mode: WipeMode?
     private let dir: URL
     private let expectedSize: UInt64
@@ -181,6 +181,10 @@ final class WipeEngine {
     private let allowDiskImage: Bool
     private var diskValidated = false
     private var sampleHashes: [UInt64: Data] = [:]
+    /// Geöffnetes Raw-Device (wird vor dem Auslesen über USB geschlossen)
+    private var rawFD: Int32 = -1
+    /// Gesundheitsdaten kamen nur über den USB-Direktzugriff – nach dem Löschen genauso lesen
+    private var usbHealthWorks = false
 
     init(disk: String, mode: WipeMode?, dir: URL, expectedSize: UInt64, allowDiskImage: Bool = false) {
         self.allowDiskImage = allowDiskImage
@@ -256,7 +260,7 @@ final class WipeEngine {
 
         status.phase = "Gesundheitsdaten werden gelesen …"
         writeStatus()
-        saveSmart("smart-before.json")
+        if let problem = saveHealthBefore(unmount: !mode.readOnly) { return finish(.failed, problem) }
 
         if mode.readOnly { return runCheck() }
 
@@ -268,7 +272,8 @@ final class WipeEngine {
         // --- Raw-Device öffnen (/dev/rdiskN wie bei dd) -------------------------------------------
         let fd = open("/dev/r\(disk)", O_RDWR)
         guard fd >= 0 else { return finish(.failed, openError(errno)) }
-        defer { close(fd) }
+        rawFD = fd
+        defer { closeRaw() }
 
         guard let size = diskSize(fd) else { return finish(.failed, sizeError) }
         if let m = sizeMismatch(size) { return finish(.failed, m) }
@@ -390,9 +395,69 @@ final class WipeEngine {
 
     // MARK: Gesundheitsdaten
 
-    private func saveSmart(_ name: String) {
+    private func closeRaw() {
+        if rawFD >= 0 { close(rawFD); rawFD = -1 }
+    }
+
+    /// Gesundheitsdaten vor dem Vorgang. Über USB liefert macOS sie nicht – dann liest das mitgelieferte
+    /// smartctl direkt über den Adapter. Das Laufwerk meldet sich dabei neu an (evtl. unter neuer
+    /// Kennung) und wird danach erneut geprüft. Gibt bei einem Problem die Fehlermeldung zurück.
+    private func saveHealthBefore(unmount: Bool) -> String? {
+        guard diskValidated, !allowDiskImage || SmartService.smartctlPath != nil else { return nil }
+        let (h, raw) = SmartService.read(disk)
+        guard !h.available, !allowDiskImage, DiskService.usbLocation(disk) != nil else {
+            saveSmart("smart-before.json", raw)
+            return nil
+        }
+        status.phase = "Gesundheitsdaten werden über den USB-Adapter gelesen …"
+        writeStatus()
+        let (h2, raw2, after) = SmartService.readViaUSB(disk, forceUnmount: unmount)
+        saveSmart("smart-before.json", raw2)
+        usbHealthWorks = h2.available
+        guard let now = after else {
+            return "Das Laufwerk hat sich nach dem Auslesen der Gesundheitsdaten nicht wieder angemeldet. Bitte ab- und wieder anstecken und erneut starten."
+        }
+        if now != disk {
+            if let problem = revalidate(now) { return problem }
+            print("Laufwerk nach dem Neuanmelden: \(disk) -> \(now)")
+            disk = now
+            status.diskNow = now
+            writeStatus()
+        }
+        return nil
+    }
+
+    /// Prüft ein Laufwerk, das sich unter neuer Kennung zurückgemeldet hat, erneut.
+    private func revalidate(_ id: String) -> String? {
+        guard DiskService.isValidWholeDiskID(id) else { return "Ungültige Laufwerkskennung »\(id)«." }
+        let externals = (Shell.diskutilPlist(["list", "-plist", "external", "physical"])?["WholeDisks"] as? [String]) ?? []
+        guard externals.contains(id) else { return "\(id) ist kein angeschlossenes externes Laufwerk – Abbruch." }
+        let protected = DiskService.protectedDisks()
+        guard !protected.isEmpty, !protected.contains(id) else { return "\(id) ist geschützt – Abbruch aus Sicherheitsgründen." }
+        let info = Shell.diskutilPlist(["info", "-plist", id]) ?? [:]
+        if (info["Internal"] as? Bool) == true { return "\(id) ist ein internes Laufwerk – Abbruch." }
+        let size = (info["TotalSize"] as? NSNumber)?.uint64Value ?? (info["Size"] as? NSNumber)?.uint64Value ?? 0
+        if expectedSize > 0 && (size > expectedSize ? size - expectedSize : expectedSize - size) > 1024 * 1024 {
+            return "Nach dem Neuanmelden hat \(id) eine andere Größe – Abbruch aus Sicherheitsgründen."
+        }
+        return nil
+    }
+
+    private func saveHealthAfter() {
         guard diskValidated, !allowDiskImage || SmartService.smartctlPath != nil else { return }
-        let (_, raw) = SmartService.read(disk)
+        closeRaw()
+        var (h, raw) = SmartService.read(disk)
+        if !h.available && usbHealthWorks {
+            status.phase = "Gesundheitsdaten werden über den USB-Adapter gelesen …"
+            writeStatus()
+            let r = SmartService.readViaUSB(disk, forceUnmount: true)
+            (h, raw) = (r.0, r.1)
+            if let now = r.2, now != disk { status.diskNow = now }
+        }
+        saveSmart("smart-after.json", raw)
+    }
+
+    private func saveSmart(_ name: String, _ raw: Data) {
         let path = dir.appendingPathComponent(name).path
         let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o644)
         guard fd >= 0 else { return }
@@ -406,7 +471,8 @@ final class WipeEngine {
     private func runCheck() -> Int32 {
         let fd = open("/dev/r\(disk)", O_RDONLY)
         guard fd >= 0 else { return finish(.failed, openError(errno)) }
-        defer { close(fd) }
+        rawFD = fd
+        defer { closeRaw() }
         guard let size = diskSize(fd) else { return finish(.failed, sizeError) }
         if let m = sizeMismatch(size) { return finish(.failed, m) }
         let chunk = WipeEngine.chunkSize
@@ -697,7 +763,8 @@ final class WipeEngine {
         print("Ende: \(state.rawValue) – \(message)")
         if diskValidated {
             status.phase = "Gesundheitsdaten werden gelesen …"
-            saveSmart("smart-after.json")
+            writeStatus()
+            saveHealthAfter()
             status.phase = "Abgeschlossen"
         }
         if hasAssertion {

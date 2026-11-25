@@ -150,6 +150,8 @@ final class AppModel: ObservableObject {
     /// Nur für den automatischen Oberflächentest (CI): keine echten Laufwerke einlesen
     static var demoMode = false
     @Published var healthByDisk: [String: DiskHealth] = [:]
+    /// Laufwerk, das nach dem Neuanmelden (USB-Direktzugriff) wieder ausgewählt werden soll
+    private var pendingSelection: String?
     @Published var selection: SidebarItem? {
         didSet {
             // Passenden Modus vorschlagen, wenn ein anderes Laufwerk gewählt wird
@@ -204,7 +206,7 @@ final class AppModel: ObservableObject {
     }
 
     func activeJob(for disk: ExternalDisk) -> WipeJob? {
-        jobs.first { $0.info.disk.id == disk.id && $0.state.isActive }
+        jobs.first { ($0.status?.diskNow ?? $0.info.disk.id) == disk.id && $0.state.isActive }
     }
 
     // MARK: Laufwerke
@@ -217,6 +219,10 @@ final class AppModel: ObservableObject {
                 self.disks = list
                 for d in list where self.healthByDisk[d.id]?.health == nil { self.ensureHealth(d) }
                 self.isRefreshing = false
+                if let p = self.pendingSelection, list.contains(where: { $0.id == p }) {
+                    self.selection = .disk(p)
+                    self.pendingSelection = nil
+                }
                 if case .disk(let id)? = self.selection, !list.contains(where: { $0.id == id }) {
                     self.selection = nil
                 }
@@ -507,6 +513,11 @@ final class AppModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let (h, raw) = SmartService.read(disk.id)
             DispatchQueue.main.async {
+                // Über den USB-Adapter gelesene Daten nicht durch »keine Daten« ersetzen
+                if !h.available, e.health?.usbTried == true, e.health?.available == true {
+                    e.loading = false
+                    return
+                }
                 e.health = h
                 e.raw = raw
                 e.readAt = Date()
@@ -519,14 +530,25 @@ final class AppModel: ObservableObject {
     func readHealthAsAdmin(_ disk: ExternalDisk) {
         let e = healthModel(disk.id)
         e.loading = true
-        DispatchQueue.main.async {
-            if let r = SmartService.readAsAdmin(disk.id) {
-                e.health = r.0
-                e.raw = r.1
-                e.readAt = Date()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = SmartService.readAsAdmin(disk)
+            DispatchQueue.main.async {
+                if let r = r {
+                    e.health = r.0
+                    e.raw = r.1
+                    e.readAt = Date()
+                    // USB-Laufwerke melden sich danach neu an – evtl. unter neuer Kennung
+                    if let obj = try? JSONSerialization.jsonObject(with: r.1) as? [String: Any],
+                       let after = (obj["wipekit_usbcap"] as? [String: Any])?["disk_after"] as? String,
+                       DiskService.isValidWholeDiskID(after) {
+                        if after != disk.id { self.healthByDisk[after] = e }
+                        self.pendingSelection = after
+                    }
+                }
+                e.loading = false
+                self.objectWillChange.send()
+                self.scheduleRefresh()
             }
-            e.loading = false
-            self.objectWillChange.send()
         }
     }
 

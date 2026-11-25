@@ -10,14 +10,18 @@ anderer Projekte gelten deren eigene Lizenzen.
 - Verwendung: WipeKit ruft das eigenständige Programm `smartctl` auf, um die Gesundheitsdaten
   (S.M.A.R.T.) der Laufwerke zu lesen und Selbsttests zu starten. WipeKit wird **nicht** mit
   smartmontools verlinkt; beide Programme kommunizieren nur über die Kommandozeile.
-- **macOS:** `smartctl` (Version 7.5) wird unverändert aus dem offiziellen Quelltext gebaut und liegt
-  in `WipeKit.app/Contents/MacOS/smartctl`.
+- **macOS:** `smartctl` (Version 7.5) wird aus dem offiziellen Quelltext gebaut und liegt in
+  `WipeKit.app/Contents/MacOS/smartctl`. **Geändert:** WipeKit ergänzt den Gerätetyp `usbcap:`, damit
+  Gesundheitsdaten auch über USB-Adapter lesbar sind (macOS reicht sie selbst nicht durch). Die
+  Änderung steht ebenfalls unter GPL-2.0-or-later und liegt offen in `macos/smartctl/`
+  (`os_darwin_usbcap.inc`, `os_darwin-usbcap.patch`, Beschreibung in `README.md`).
 - **Windows:** `smartctl.exe` (Version 7.5) stammt unverändert aus dem offiziellen Installationspaket
   des smartmontools-Projekts und ist in `WipeKit.exe` eingebettet.
 - **Linux:** wird nicht mitgeliefert, sondern als Paket der Distribution installiert (`smartmontools`).
 - Lizenztext: `licenses/GPL-2.0.txt` (liegt jedem Download bei).
-- **Quelltext:** Der vollständige, zugehörige Quelltext (`smartmontools-7.5.tar.gz`) ist bei jedem
-  WipeKit-Release auf GitHub als eigene Datei angehängt:
+- **Quelltext:** Der vollständige, zugehörige Quelltext ist bei jedem WipeKit-Release auf GitHub als
+  eigene Datei angehängt – das Original (`smartmontools-7.5.tar.gz`) und die für macOS geänderte,
+  baubare Fassung (`smartmontools-7.5-wipekit.tar.gz`):
   https://github.com/mllsm66/WipeKit/releases
 
 ## hdparm und nvme-cli (nur Linux)

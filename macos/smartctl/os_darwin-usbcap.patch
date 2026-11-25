@@ -1,0 +1,48 @@
+--- a/os_darwin.cpp
++++ b/os_darwin.cpp
+@@ -607,6 +607,11 @@
+   return true;
+ }
+ //////////////////////////////////////////////////////////////////////
++/// USB drives via device capture (WipeKit)
++
++#include "os_darwin_usbcap.inc"
++
++//////////////////////////////////////////////////////////////////////
+ 
+ std::string darwin_smart_interface::get_os_version_str()
+ {
+@@ -629,9 +634,11 @@
+   return new darwin_ata_device(this, name, type);
+ }
+ 
+-scsi_device * darwin_smart_interface::get_scsi_device(const char *, const char *)
++scsi_device * darwin_smart_interface::get_scsi_device(const char * name, const char * type)
+ {
+-  return 0; // scsi devices are not supported [yet]
++  if (str_starts_with(name, "usbcap:"))
++    return new darwin_usbcap_device(this, name, type);
++  return 0; // other scsi devices are not supported [yet]
+ }
+ 
+ nvme_device * darwin_smart_interface::get_nvme_device(const char * name, const char * type,
+@@ -650,6 +657,19 @@
+   // IODeviceTree:*
+   const char *devname = NULL;
+   io_object_t disk;
++
++  // USB drive via device capture (WipeKit): detect the bridge by its USB ID
++  if (str_starts_with(name, "usbcap:")) {
++    usbcap::usb_id id;
++    if (!usbcap::resolve(name, id))
++      return set_err_np(ENODEV, "%s: USB drive not found", name);
++    const char * usbtype = get_usb_dev_type_by_id(id.vid, id.pid, id.bcd);
++    if (!usbtype) {
++      clear_err();
++      usbtype = "sat"; // unknown bridge: most speak SAT
++    }
++    return get_scsi_passthrough_device(usbtype, new darwin_usbcap_device(this, name, ""));
++  }
+   
+   if (strncmp (name, "/dev/rdisk", 10) == 0)
+     devname = name + 6;

@@ -44,6 +44,8 @@ struct SelfTestEntry: Identifiable {
 struct Health {
     var available = false
     var reason = ""
+    /// Wurde der USB-Direktzugriff (smartctl „usbcap“) versucht?
+    var usbTried = false
     var proto = ""
     var vendor = ""
     var family = ""
@@ -112,10 +114,10 @@ enum HealthParser {
     ]
 
     static let vendors: [(String, String)] = [
-        ("^WDC\\b", "Western Digital"), ("^WD_?BLACK", "Western Digital"), ("^WD\\d", "Western Digital"),
+        ("^WDC\\b", "Western Digital"), ("^WD_?BLACK", "Western Digital"), ("^WD\\d", "Western Digital"), ("^WDS\\d", "Western Digital"),
         ("^WD\\b", "Western Digital"), ("^Western Digital", "Western Digital"), ("^ST\\d", "Seagate"),
         ("^Seagate", "Seagate"), ("^TOSHIBA", "Toshiba"), ("^KIOXIA", "Kioxia"), ("^HGST", "HGST"),
-        ("^(HUS|HUH|HUA)", "HGST"), ("^(Hitachi|HDS\\d|HTS\\d|HDT\\d)", "Hitachi"), ("^(SAMSUNG|Samsung)", "Samsung"),
+        ("^(HUS|HUH|HUA)", "HGST"), ("^(Hitachi|HDS\\d|HTS\\d|HDT\\d)", "Hitachi"), ("^(SAMSUNG|Samsung|MZ-|MZ7|MZV)", "Samsung"), ("^HD\\d{3}[A-Z]{1,2}J\\b", "Samsung"),
         ("^(Crucial|CT\\d)", "Crucial"), ("^(Micron|MTFD)", "Micron"), ("^(INTEL|Intel|SSDSC|SSDPE)", "Intel"),
         ("^(KINGSTON|Kingston|SA400|SKC|SNV|SUV)", "Kingston"), ("^(SanDisk|SDSSD)", "SanDisk"),
         ("^(SK ?hynix|HFS\\d|HFM\\d)", "SK hynix"), ("^(ADATA|XPG)", "ADATA"), ("^(Transcend|TS\\d+G)", "Transcend"),
@@ -159,6 +161,18 @@ enum HealthParser {
 
     static func friendlyReason(_ msgs: [String]) -> String {
         let text = msgs.joined(separator: " ").lowercased()
+        if text.contains("is mounted") {
+            return "Ein Volume des Laufwerks ist noch eingebunden. Bitte im Finder auswerfen und erneut versuchen."
+        }
+        if text.contains("hand over") || text.contains("not privileged") {
+            return "macOS hat den Direktzugriff auf den USB-Adapter verweigert. Gib WipeKit in den Systemeinstellungen unter »Datenschutz & Sicherheit« den »Festplattenvollzugriff« und versuche es erneut."
+        }
+        if text.contains("bulk-only") || text.contains("usb transfer failed") || text.contains("read device identity failed") {
+            return "Der USB-Adapter gibt die Gesundheitsdaten (S.M.A.R.T.) nicht an das Laufwerk weiter."
+        }
+        if text.contains("requires administrator") {
+            return "Für den Direktzugriff auf den USB-Adapter sind Administratorrechte nötig."
+        }
         if text.contains("smartctl fehlt") {
             return "Das Diagnoseprogramm smartctl fehlt in dieser WipeKit-Version."
         }
@@ -190,6 +204,7 @@ enum HealthParser {
 
     static func parse(_ j: [String: Any]) -> Health {
         var h = Health()
+        h.usbTried = j["wipekit_usbcap"] != nil
         let dev = dict(j["device"])
         h.proto = str(dev["protocol"])
         h.model = str(j["model_name"]).isEmpty ? str(j["scsi_model_name"]) : str(j["model_name"])

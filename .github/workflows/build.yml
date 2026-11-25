@@ -37,6 +37,10 @@ jobs:
           lipo -archs "$APP/Contents/MacOS/WipeKit"
           lipo -archs "$APP/Contents/MacOS/smartctl"
           "$APP/Contents/MacOS/smartctl" --version | head -2
+          # USB-Direktzugriff (WipeKit-Ergänzung) ist eingebaut: unbekanntes Gerät -> klare Meldung
+          OUT=$("$APP/Contents/MacOS/smartctl" -i -j usbcap:0x7fffffff || true)
+          echo "$OUT" | head -20
+          echo "$OUT" | grep -q "USB drive not found"
           ls "$APP/Contents/Resources" "$APP/Contents/Resources/Lizenzen"
           codesign --verify --deep --strict "$APP" && echo "Signatur in Ordnung"
 
@@ -92,6 +96,8 @@ jobs:
           run quick
           run secure
           run check
+          echo "--- --usb-health (kein USB-Laufwerk -> normales Lesen)"
+          sudo macos/build/WipeKit.app/Contents/MacOS/WipeKit --usb-health "$DEV" | head -c 400; echo
           hdiutil detach "/dev/$DEV" -force || true
 
       - name: Bildschirmfotos ins Protokoll schreiben
@@ -108,7 +114,7 @@ jobs:
         run: |
           mkdir -p dist
           ditto -c -k --keepParent macos/build/WipeKit.app "dist/WipeKit-macOS-${VERSION}.zip"
-          cp macos/vendor/smartmontools-7.5.tar.gz dist/
+          cp macos/vendor/smartmontools-7.5.tar.gz macos/vendor/smartmontools-7.5-wipekit.tar.gz dist/
 
       - uses: actions/upload-artifact@v7
         with:

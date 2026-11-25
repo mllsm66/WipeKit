@@ -141,6 +141,24 @@ class ReportTests(unittest.TestCase):
             self.assertIn("Pruefprotokoll", pdf.name)
             self.check_pdf(pdf)
 
+    def test_short_protocol_one_page(self):
+        """Das kurze Löschprotokoll passt auch im ungünstigsten Fall (SSD-Modus, keine Daten) auf eine Seite."""
+        h = load("usb-unsupported")
+        ident = rp.identity_from(h, "WDS500G2B0A-00SM50", 500107862016, "")
+        w = self.wipe_info(mode_title="SSD", method="2 Durchgänge Zufallsdaten + vollständige Lese-Verifikation + TRIM aller Blöcke",
+                           standard="NIST SP 800-88 Rev. 2 – »Clear« (Überschreiben) – für SSDs nach bestem Bemühen",
+                           verification="bestanden – alle Sektoren gelesen und mit den geschriebenen Zufallsdaten verglichen",
+                           trim="durchgeführt – alle Blöcke freigegeben", type_label="SSD", volumes=["EFI", "Ohne Titel"],
+                           message="Alle Sektoren wurden überschrieben und die Prüfung war erfolgreich.",
+                           host="iMac von Ben", platform="macOS 26.7.3")
+        pdf, _ = rp.save(rp.wipe_report(w, ident, h, h, False), self.tmp)
+        try:
+            out = subprocess.run(["pdfinfo", str(pdf)], capture_output=True, text=True).stdout
+        except FileNotFoundError:
+            self.skipTest("pdfinfo fehlt")
+        pages = [l for l in out.splitlines() if l.startswith("Pages:")]
+        self.assertEqual(pages[0].split()[-1], "1", out)
+
     def test_detailed_contains_values(self):
         h = load("hdd")
         r = rp.wipe_report(self.wipe_info(), rp.identity_from(h), h, h, detailed=True)

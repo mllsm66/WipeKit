@@ -191,6 +191,12 @@ namespace WipeKit
         public static string Dt(DateTime d, bool seconds = false) =>
             d.ToString(seconds ? "dd.MM.yyyy, HH:mm:ss" : "dd.MM.yyyy, HH:mm", De) + " Uhr";
 
+        /// "22.11.2026, 21:15 – 22:55 Uhr" bzw. über Mitternacht mit beiden Daten
+        public static string Period(DateTime a, DateTime b) =>
+            a.Date == b.Date
+                ? $"{a.ToString("dd.MM.yyyy, HH:mm", De)} – {b.ToString("HH:mm", De)} Uhr"
+                : $"{a.ToString("dd.MM.yyyy, HH:mm", De)} – {b.ToString("dd.MM.yyyy, HH:mm", De)} Uhr";
+
         public static List<ReportSection> HealthSections(Health h, string suffix = "", bool tables = true)
         {
             if (h == null || !h.Available)
@@ -274,12 +280,27 @@ namespace WipeKit
             };
             double duration = Math.Max(0, (w.Ended - w.Started).TotalSeconds);
             double avg = duration > 0 ? w.BytesWritten / duration : 0;
-            var rows = new List<(string, string)> { ("Ergebnis", res), ("Methode", w.ModeTitle), ("Ablauf", w.Method), ("Vorgehen orientiert an", w.Standard) };
+            // Das kurze Protokoll passt auf eine Seite: Ergebnis steht schon im Banner, Zeiten in einer Zeile
+            bool compact = !detailed && !w.ReadOnly;
+            string speed = avg > 0 && w.PurgeMethod == "" ? Fmt.Speed(avg) : "–";
+            var rows = new List<(string, string)>();
+            if (!compact) rows.Add(("Ergebnis", res));
+            rows.Add(("Methode", w.ModeTitle));
+            rows.Add(("Ablauf", w.Method));
+            rows.Add(("Vorgehen orientiert an", w.Standard));
             if (w.PurgeMethod != "") rows.Add(("Firmware-Befehl", w.PurgeMethod));
-            rows.Add(("Beginn", Dt(w.Started, true)));
-            rows.Add(("Ende", Dt(w.Ended, true)));
-            rows.Add(("Dauer", Fmt.Duration(TimeSpan.FromSeconds(duration))));
-            rows.Add(("Ø Geschwindigkeit", avg > 0 && w.PurgeMethod == "" ? Fmt.Speed(avg) : "–"));
+            if (compact)
+            {
+                rows.Add(("Zeitraum", Period(w.Started, w.Ended)));
+                rows.Add(("Dauer", Fmt.Duration(TimeSpan.FromSeconds(duration)) + (speed == "–" ? "" : $" (Ø {speed})")));
+            }
+            else
+            {
+                rows.Add(("Beginn", Dt(w.Started, true)));
+                rows.Add(("Ende", Dt(w.Ended, true)));
+                rows.Add(("Dauer", Fmt.Duration(TimeSpan.FromSeconds(duration))));
+                rows.Add(("Ø Geschwindigkeit", speed));
+            }
             if (w.ReadOnly)
             {
                 if (w.NonZero.HasValue)
@@ -289,7 +310,7 @@ namespace WipeKit
             else rows.Add(("Verifikation", w.Verification == "" ? "–" : w.Verification));
             if (w.Trim != "") rows.Add(("TRIM", w.Trim));
             if (w.HiddenArea != "") rows.Add(("Versteckte Bereiche", w.HiddenArea));
-            if (w.Message != "") rows.Add(("Meldung", w.Message));
+            if (w.Message != "" && !(compact && w.State == JobState.Done)) rows.Add(("Meldung", w.Message));
             r.Sections.Add(new ReportSection(w.ReadOnly ? "Prüfung" : "Löschvorgang", Kv(rows)));
             r.Sections.Add(new ReportSection("Laufwerk", Kv(new List<(string, string)>
             {
@@ -323,11 +344,19 @@ namespace WipeKit
                     }
                 }
             }
-            r.Sections.Add(new ReportSection("Protokoll", Kv(new List<(string, string)>
+            if (compact)
             {
-                ("Erstellt", Dt(r.Created, true)), ("Rechner", w.Host == "" ? "–" : w.Host),
-                ("System", w.Platform == "" ? "–" : w.Platform), ("Programm", "WipeKit " + w.AppVersion),
-            }), Txt(NotCertified)));
+                string line = $"Erstellt am {Dt(r.Created, true)} auf »{(w.Host == "" ? "–" : w.Host)}« ({(w.Platform == "" ? "–" : w.Platform)}) mit WipeKit {w.AppVersion}.";
+                r.Sections.Add(new ReportSection("Protokoll", Txt(line + " " + NotCertified)));
+            }
+            else
+            {
+                r.Sections.Add(new ReportSection("Protokoll", Kv(new List<(string, string)>
+                {
+                    ("Erstellt", Dt(r.Created, true)), ("Rechner", w.Host == "" ? "–" : w.Host),
+                    ("System", w.Platform == "" ? "–" : w.Platform), ("Programm", "WipeKit " + w.AppVersion),
+                }), Txt(NotCertified)));
+            }
             r.Footer = "WipeKit " + w.AppVersion;
             return r;
         }

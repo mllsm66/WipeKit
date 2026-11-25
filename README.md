@@ -68,13 +68,13 @@ Dateiname: `Datum_Uhrzeit_HERSTELLER-MODELL-GRÖSSE-SERIENNUMMER_Berichtsart`, z
 | | Windows | macOS | Linux |
 |---|---|---|---|
 | Gesundheitsdaten interner Laufwerke | ✓ | ✓ | ✓ |
-| Gesundheitsdaten über USB | ✓ (je nach Adapter) | nur mit Zusatztreiber (siehe unten) | ✓ (je nach Adapter) |
+| Gesundheitsdaten über USB | ✓ (je nach Adapter) | ✓ (je nach Adapter, Laufwerk wird kurz ausgeworfen) | ✓ (je nach Adapter) |
 | Interne Laufwerke löschen | ✓ nach zusätzlicher Bestätigung | – (nur Diagnose) | ✓ nach zusätzlicher Bestätigung |
 | Firmware-Löschung | NVMe-SSDs | – (von macOS nicht freigegeben) | SATA- und NVMe-SSDs |
 
 ### Gesundheitsdaten über USB am Mac
 
-macOS gibt die Gesundheitsdaten über USB grundsätzlich nicht an Programme weiter. Lesbar sind sie bei internen Laufwerken und bei NVMe-SSDs in **Thunderbolt-/USB4-Gehäusen**. Für SATA-Laufwerke in USB-Gehäusen gibt es den kostenlosen Open-Source-Treiber [SAT SMART Driver](https://binaryfruit.com/drivedx/usb-drive-support); auf Macs mit Apple-Chip muss dafür die Sicherheitsstufe gesenkt werden. WipeKit liefert ihn bewusst nicht mit, zeigt die Daten nach der Installation aber automatisch an.
+macOS gibt die Gesundheitsdaten über USB grundsätzlich nicht an Programme weiter. WipeKit liest sie deshalb **direkt über den USB-Adapter**: Das Laufwerk wird dafür kurz ausgeworfen, das mitgelieferte `smartctl` übernimmt das USB-Gerät für wenige Sekunden und gibt es danach an macOS zurück. Dafür ist das Administrator-Passwort nötig; Daten werden nicht verändert. Beim Löschen geschieht das automatisch vor und nach dem Vorgang. Ob es klappt, hängt vom Adapter ab – Chips von ASMedia, JMicron und Realtek geben die Daten meist weiter. Ohne Umweg lesbar sind interne Laufwerke und NVMe-SSDs in **Thunderbolt-/USB4-Gehäusen**. Selbsttests sind über diesen Weg nicht möglich.
 
 ## Download & Installation
 
@@ -130,4 +130,4 @@ Bei jedem neuen Release baut GitHub Actions alle Versionen automatisch, testet s
 
 WipeKit: [MIT](LICENSE) © 2026 mllsm66.
 
-Für die Diagnose verwendet WipeKit das Programm `smartctl` aus [smartmontools](https://www.smartmontools.org) (GPL-2.0-or-later). Es ist unter macOS und Windows als eigenständiges, unverändertes Programm enthalten; der zugehörige Quelltext liegt jedem Release als `smartmontools-7.5.tar.gz` bei. Details: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Herstellernamen werden nur beschreibend verwendet.
+Für die Diagnose verwendet WipeKit das Programm `smartctl` aus [smartmontools](https://www.smartmontools.org) (GPL-2.0-or-later). Es ist unter macOS und Windows als eigenständiges Programm enthalten. Unter Windows unverändert; unter macOS um den USB-Direktzugriff `usbcap:` ergänzt (ebenfalls GPL, siehe `macos/smartctl/`). Der zugehörige Quelltext liegt jedem Release bei (`smartmontools-7.5.tar.gz` und `smartmontools-7.5-wipekit.tar.gz`). Details: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Herstellernamen werden nur beschreibend verwendet.

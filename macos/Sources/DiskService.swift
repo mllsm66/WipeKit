@@ -1,14 +1,16 @@
 import Foundation
 import DiskArbitration
+import IOKit
 
 // MARK: - Shell
 
 enum Shell {
     @discardableResult
-    static func run(_ path: String, _ args: [String]) -> (status: Int32, out: Data) {
+    static func run(_ path: String, _ args: [String], env: [String: String]? = nil) -> (status: Int32, out: Data) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
+        if let env = env { p.environment = ProcessInfo.processInfo.environment.merging(env) { $1 } }
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
@@ -124,6 +126,8 @@ enum DiskService {
                 ?? (entry["Size"] as? NSNumber)?.uint64Value
                 ?? 0
             guard size > 0 else { continue }
+            // Winzige Pseudo-Laufwerke (z. B. Treiber-CDs von WLAN- oder Mobilfunk-Sticks) sind kein Speicher
+            if !isInternal && size < 8_000_000 { continue }
 
             disks.append(ExternalDisk(
                 id: id,
@@ -147,6 +151,33 @@ enum DiskService {
     }
 
     static func listExternalDisks() -> [ExternalDisk] { listDisks().filter { !$0.isInternal } }
+
+    // MARK: USB
+
+    /// USB-Location-ID des USB-Geräts, an dem das Laufwerk hängt (nil = nicht über USB angeschlossen)
+    static func usbLocation(_ bsd: String) -> UInt32? {
+        guard let match = IOBSDNameMatching(0, 0, bsd) else { return nil }
+        var e = IOServiceGetMatchingService(0, match)
+        while e != 0 {
+            if IOObjectConformsTo(e, "IOUSBHostDevice") != 0 || IOObjectConformsTo(e, "IOUSBDevice") != 0 {
+                let v = IORegistryEntryCreateCFProperty(e, "locationID" as CFString, kCFAllocatorDefault, 0)?
+                    .takeRetainedValue() as? NSNumber
+                IOObjectRelease(e)
+                return v?.uint32Value
+            }
+            var parent: io_registry_entry_t = 0
+            let kr = IORegistryEntryGetParentEntry(e, kIOServicePlane, &parent)
+            IOObjectRelease(e)
+            e = kr == KERN_SUCCESS ? parent : 0
+        }
+        return nil
+    }
+
+    /// Das Laufwerk, das (wieder) am USB-Gerät mit dieser Location-ID hängt
+    static func wholeDisk(usbLocation loc: UInt32) -> String? {
+        let list = (Shell.diskutilPlist(["list", "-plist", "external", "physical"])?["WholeDisks"] as? [String]) ?? []
+        return list.first { usbLocation($0) == loc }
+    }
 }
 
 // MARK: - Automatische Aktualisierung beim An-/Abstecken

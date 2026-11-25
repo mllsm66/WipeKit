@@ -181,6 +181,21 @@ enum Reports {
         return f.string(from: d)
     }
 
+    /// "22.11.2026, 21:15 – 22:55 Uhr" bzw. über Mitternacht mit beiden Daten
+    static func period(_ a: Date, _ b: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "de_DE")
+        f.dateFormat = "HH:mm"
+        if Calendar.current.isDate(a, inSameDayAs: b) {
+            f.dateFormat = "dd.MM.yyyy, HH:mm"
+            let start = f.string(from: a)
+            f.dateFormat = "HH:mm"
+            return "\(start) – \(f.string(from: b)) Uhr"
+        }
+        f.dateFormat = "dd.MM.yyyy, HH:mm"
+        return "\(f.string(from: a)) – \(f.string(from: b)) Uhr"
+    }
+
     static func healthSections(_ h: Health?, suffix: String = "", tables: Bool = true) -> [ReportSection] {
         guard let h = h, h.available else {
             let reason = (h?.reason.isEmpty == false) ? h!.reason : "Keine S.M.A.R.T.-Daten verfügbar."
@@ -257,12 +272,19 @@ enum Reports {
                        ratingNote: note(h), banner: (res, color))
         let duration = max(0, w.ended.timeIntervalSince(w.started))
         let avg = duration > 0 ? Double(w.bytesWritten) / duration : 0
-        var rows: [(String, String)] = [("Ergebnis", res), ("Methode", w.modeTitle), ("Ablauf", w.method),
-                                        ("Vorgehen orientiert an", w.standard)]
+        // Das kurze Protokoll passt auf eine Seite: Ergebnis steht schon im Banner, Zeiten in einer Zeile
+        let compact = !detailed && !w.readOnly
+        let speed = avg > 0 && w.purgeMethod.isEmpty ? HFmt.bytes(UInt64(avg)) + "/s" : "–"
+        var rows: [(String, String)] = compact ? [] : [("Ergebnis", res)]
+        rows += [("Methode", w.modeTitle), ("Ablauf", w.method), ("Vorgehen orientiert an", w.standard)]
         if !w.purgeMethod.isEmpty { rows.append(("Firmware-Befehl", w.purgeMethod)) }
-        rows += [("Beginn", dt(w.started, seconds: true)), ("Ende", dt(w.ended, seconds: true)),
-                 ("Dauer", Fmt.duration(duration)),
-                 ("Ø Geschwindigkeit", avg > 0 && w.purgeMethod.isEmpty ? HFmt.bytes(UInt64(avg)) + "/s" : "–")]
+        if compact {
+            rows += [("Zeitraum", period(w.started, w.ended)),
+                     ("Dauer", Fmt.duration(duration) + (speed == "–" ? "" : " (Ø \(speed))"))]
+        } else {
+            rows += [("Beginn", dt(w.started, seconds: true)), ("Ende", dt(w.ended, seconds: true)),
+                     ("Dauer", Fmt.duration(duration)), ("Ø Geschwindigkeit", speed)]
+        }
         if w.readOnly {
             if let nz = w.nonZero {
                 rows.append(("Inhalt", nz == 0 ? "leer – alle Sektoren enthalten Nullen" : "\(HFmt.bytesLong(nz)) enthalten Daten"))
@@ -273,7 +295,7 @@ enum Reports {
         }
         if !w.trim.isEmpty { rows.append(("TRIM", w.trim)) }
         if !w.hiddenArea.isEmpty { rows.append(("Versteckte Bereiche", w.hiddenArea)) }
-        if !w.message.isEmpty { rows.append(("Meldung", w.message)) }
+        if !w.message.isEmpty && !(compact && w.state == .done) { rows.append(("Meldung", w.message)) }
         r.sections.append(ReportSection(title: w.readOnly ? "Prüfung" : "Löschvorgang", blocks: [.kv(rows)]))
         r.sections.append(ReportSection(title: "Laufwerk", blocks: [.kv([
             ("Kennung", w.device.isEmpty ? "–" : w.device), ("Anschluss", w.bus.isEmpty ? "–" : w.bus),
@@ -298,9 +320,14 @@ enum Reports {
                 }
             }
         }
-        r.sections.append(ReportSection(title: "Protokoll", blocks: [.kv([
-            ("Erstellt", dt(r.created, seconds: true)), ("Rechner", w.host.isEmpty ? "–" : w.host),
-            ("System", w.platform.isEmpty ? "–" : w.platform), ("Programm", "WipeKit \(w.appVersion)")]), .text(notCertified)]))
+        if compact {
+            let line = "Erstellt am \(dt(r.created, seconds: true)) auf »\(w.host.isEmpty ? "–" : w.host)« (\(w.platform.isEmpty ? "–" : w.platform)) mit WipeKit \(w.appVersion)."
+            r.sections.append(ReportSection(title: "Protokoll", blocks: [.text(line + " " + notCertified)]))
+        } else {
+            r.sections.append(ReportSection(title: "Protokoll", blocks: [.kv([
+                ("Erstellt", dt(r.created, seconds: true)), ("Rechner", w.host.isEmpty ? "–" : w.host),
+                ("System", w.platform.isEmpty ? "–" : w.platform), ("Programm", "WipeKit \(w.appVersion)")]), .text(notCertified)]))
+        }
         r.footer = "WipeKit \(w.appVersion)"
         return r
     }

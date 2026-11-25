@@ -44,10 +44,10 @@ ATTRIBUTE_NAMES = {
 
 # Hersteller: (Muster am Anfang von Modellfamilie/Modell, Herstellername)
 VENDORS = [
-    (r"WDC\b", "Western Digital"), (r"WD_?BLACK", "Western Digital"), (r"WD\d", "Western Digital"),
+    (r"WDC\b", "Western Digital"), (r"WD_?BLACK", "Western Digital"), (r"WD\d", "Western Digital"), (r"WDS\d", "Western Digital"),
     (r"WD\b", "Western Digital"), (r"Western Digital", "Western Digital"), (r"ST\d", "Seagate"),
     (r"Seagate", "Seagate"), (r"TOSHIBA", "Toshiba"), (r"KIOXIA", "Kioxia"), (r"HGST", "HGST"),
-    (r"HUS|HUH|HUA", "HGST"), (r"Hitachi|HDS\d|HTS\d|HDT\d", "Hitachi"), (r"SAMSUNG|Samsung", "Samsung"),
+    (r"HUS|HUH|HUA", "HGST"), (r"Hitachi|HDS\d|HTS\d|HDT\d", "Hitachi"), (r"SAMSUNG|Samsung|MZ-|MZ7|MZV", "Samsung"), (r"HD\d{3}[A-Z]{1,2}J\b", "Samsung"),
     (r"Crucial|CT\d", "Crucial"), (r"Micron|MTFD", "Micron"), (r"INTEL|Intel|SSDSC|SSDPE", "Intel"),
     (r"KINGSTON|Kingston|SA400|SKC|SNV|SUV", "Kingston"), (r"SanDisk|SDSSD", "SanDisk"),
     (r"SK ?hynix|HFS\d|HFM\d", "SK hynix"), (r"ADATA|XPG", "ADATA"), (r"Transcend|TS\d+G", "Transcend"),

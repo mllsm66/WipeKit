@@ -33,14 +33,86 @@ enum SmartService {
     }
 
     /// Liest mit Administratorrechten (Passwortabfrage) – für Laufwerke, die ohne Rechte nicht antworten.
-    static func readAsAdmin(_ diskID: String) -> (Health, Data)? {
-        guard DiskService.isValidWholeDiskID(diskID), let exe = smartctlPath else { return nil }
-        let cmd = "'\(exe.replacingOccurrences(of: "'", with: "'\\''"))' -x -j /dev/\(diskID) || true"
-        let source = "do shell script \"\(AppModel.appleScriptEscape(cmd))\" with prompt \"WipeKit möchte die Gesundheitsdaten von \(diskID) lesen. Es werden keine Daten verändert.\" with administrator privileges"
-        var err: NSDictionary?
-        guard let out = NSAppleScript(source: source)?.executeAndReturnError(&err).stringValue, err == nil else { return nil }
-        let data = Data(out.utf8)
-        return (HealthParser.parse(data: data), data)
+    /// USB-Laufwerke werden dabei direkt über den Adapter gelesen (kurz ausgeworfen, siehe readViaUSB).
+    static func readAsAdmin(_ disk: ExternalDisk) -> (Health, Data)? {
+        guard DiskService.isValidWholeDiskID(disk.id) else { return nil }
+        let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        let cmd = [exe, "--usb-health", disk.id].map(AppModel.shellQuote).joined(separator: " ")
+        let prompt = disk.bus == "USB"
+            ? "WipeKit möchte die Gesundheitsdaten von »\(disk.name)« direkt über den USB-Adapter lesen. Dafür wird das Laufwerk kurz ausgeworfen und danach wieder verbunden. Es werden keine Daten verändert."
+            : "WipeKit möchte die Gesundheitsdaten von »\(disk.name)« lesen. Es werden keine Daten verändert."
+        let source = "do shell script \"\(AppModel.appleScriptEscape(cmd))\" with prompt \"\(AppModel.appleScriptEscape(prompt))\" with administrator privileges without altering line endings"
+        // osascript statt NSAppleScript: läuft im Hintergrund, die Oberfläche bleibt bedienbar
+        let r = Shell.run("/usr/bin/osascript", ["-e", source])
+        guard r.status == 0, !r.out.isEmpty else { return nil }
+        return (HealthParser.parse(data: r.out), r.out)
+    }
+
+    /// Für `WipeKit --usb-health diskN` (läuft als root): liest und gibt das JSON aus.
+    static func runUSBHealthCommand(_ args: [String]) -> Int32 {
+        guard let id = args.first, DiskService.isValidWholeDiskID(id) else { return 2 }
+        let data: Data
+        if DiskService.usbLocation(id) != nil {
+            data = readViaUSB(id, forceUnmount: false).1
+        } else {
+            data = read(id).1
+        }
+        FileHandle.standardOutput.write(data)
+        return 0
+    }
+
+    /// Weitere Adapter-Befehle, falls die Datenbank von smartmontools den Adapter nicht kennt
+    static let usbFallbackTypes = ["sat", "sntjmicron", "sntasmedia", "sntrealtek", "usbjmicron",
+                                   "usbcypress", "usbprolific", "usbsunplus", "sat,12"]
+
+    /// Gesundheitsdaten direkt über den USB-Adapter (nur als root).
+    /// macOS gibt diese Befehle über USB nicht weiter. Das mitgelieferte smartctl übernimmt deshalb
+    /// das USB-Gerät kurz selbst („usbcap“) und gibt es danach an macOS zurück. Das Laufwerk wird
+    /// dafür ausgeworfen und meldet sich anschließend neu an – eventuell unter neuer Kennung.
+    /// Gibt Auswertung, JSON und die Kennung nach dem Neuanmelden zurück.
+    static func readViaUSB(_ diskID: String, forceUnmount: Bool) -> (Health, Data, String?) {
+        func fail(_ text: String) -> (Health, Data, String?) {
+            let obj: [String: Any] = ["smartctl": ["messages": [["string": text, "severity": "error"]]],
+                                      "wipekit_usbcap": ["tried": true]]
+            let d = (try? JSONSerialization.data(withJSONObject: obj)) ?? missingJSON
+            return (HealthParser.parse(data: d), d, diskID)
+        }
+        guard geteuid() == 0 else { return fail("requires administrator rights") }
+        guard let exe = smartctlPath else { return fail("smartctl fehlt") }
+        guard let loc = DiskService.usbLocation(diskID) else { return fail("not a USB drive") }
+        let dev = String(format: "usbcap:0x%08x", loc)
+
+        Shell.run("/usr/sbin/diskutil", ["unmountDisk"] + (forceUnmount ? ["force"] : []) + ["/dev/\(diskID)"])
+
+        var best: Data?
+        var attempts: [[String: Any]] = []
+        for type in [nil] + usbFallbackTypes.map(Optional.some) {
+            let args = ["-x", "-j"] + (type.map { ["-d", $0] } ?? []) + [dev]
+            let r = Shell.run(exe, args, env: ["WIPEKIT_USBCAP_KEEP": "1"])
+            let h = HealthParser.parse(data: r.out)
+            let obj = (try? JSONSerialization.jsonObject(with: r.out)) as? [String: Any] ?? [:]
+            let msgs = ((obj["smartctl"] as? [String: Any])?["messages"] as? [[String: Any]] ?? [])
+                .compactMap { $0["string"] as? String }
+            attempts.append(["type": type ?? "auto", "ok": h.available, "messages": msgs])
+            if best == nil || h.available { best = r.out }
+            if h.available { break }
+            // Hat das Übernehmen selbst nicht geklappt, helfen andere Adapter-Befehle auch nicht
+            let text = msgs.joined(separator: " ").lowercased()
+            if ["mounted", "hand over", "administrator", "not found", "bulk-only", "not accessible"].contains(where: text.contains) { break }
+        }
+        // Gerät an macOS zurückgeben
+        Shell.run(exe, ["-i", "-j", "-d", "scsi", dev])
+
+        var after: String?
+        for _ in 0..<40 {
+            if let d = DiskService.wholeDisk(usbLocation: loc) { after = d; break }
+            usleep(500_000)
+        }
+        var obj = ((try? JSONSerialization.jsonObject(with: best ?? missingJSON)) as? [String: Any]) ?? [:]
+        obj["wipekit_usbcap"] = ["tried": true, "location": String(format: "0x%08x", loc),
+                                 "attempts": attempts, "disk_after": after ?? ""] as [String: Any]
+        let data = (try? JSONSerialization.data(withJSONObject: obj)) ?? (best ?? missingJSON)
+        return (HealthParser.parse(data: data), data, after)
     }
 
     /// Startet einen Selbsttest (short, long, conveyance) oder bricht ihn ab (abort).
@@ -104,14 +176,4 @@ enum MacInfo {
         Host.current().localizedName ?? ProcessInfo.processInfo.hostName
     }
 
-    /// Erklärung, warum über USB keine Gesundheitsdaten kommen – und wie es trotzdem geht
-    static let usbExplanation = "macOS leitet die Gesundheitsdaten (S.M.A.R.T.) über USB grundsätzlich nicht an Programme weiter – das ist eine Einschränkung von macOS, nicht des Laufwerks."
-    static let usbWays: [(String, String)] = [
-        ("Intern einbauen", "Interne SATA- und NVMe-Laufwerke liefern ihre Gesundheitsdaten immer."),
-        ("Thunderbolt / USB4", "NVMe-SSDs in einem Thunderbolt- oder USB4-Gehäuse arbeiten wie interne Laufwerke – die Daten sind lesbar."),
-        ("Treiber für USB (nur SATA)", "Der kostenlose Open-Source-Treiber »SAT SMART Driver« macht die Daten von SATA-Laufwerken in vielen USB-Gehäusen lesbar. Auf Macs mit Apple-Chip muss dafür die Sicherheitsstufe auf »Reduzierte Sicherheit« gesenkt werden – das ist ein Eingriff in den Systemschutz. NVMe-SSDs in USB-Gehäusen werden auch damit nicht unterstützt."),
-        ("Windows oder Linux", "WipeKit für Windows und Linux liest die Daten über USB-Adapter direkt (ohne Treiber)."),
-    ]
-    static let satDriverURL = URL(string: "https://binaryfruit.com/drivedx/usb-drive-support")!
-    static let satDriverSourceURL = URL(string: "https://github.com/kasbert/OS-X-SAT-SMART-Driver")!
 }
