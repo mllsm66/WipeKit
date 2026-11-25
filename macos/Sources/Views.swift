@@ -944,22 +944,22 @@ struct DiagnoseView: View {
                 }
                 .padding(.vertical, 2)
             } else if usb && !h.usbTried {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("macOS gibt die Gesundheitsdaten von USB-Laufwerken nicht an Programme weiter. WipeKit kann sie direkt über den USB-Adapter lesen.")
-                        .fixedSize(horizontal: false, vertical: true)
+                Text("macOS gibt die Gesundheitsdaten von USB-Laufwerken nicht an Programme weiter. WipeKit kann sie direkt über den USB-Adapter lesen.")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
+                HStack(alignment: .center, spacing: 12) {
                     Text("Dafür wird das Laufwerk kurz ausgeworfen und meldet sich danach wieder an. Daten werden nicht verändert.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                HStack {
-                    Spacer()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Button("Über USB-Adapter lesen …") { model.readHealthAsAdmin(disk) }
                         .buttonStyle(.borderedProminent)
                         .disabled(model.isBusy(disk))
                         .help("Administrator-Passwort nötig")
                 }
+                .padding(.vertical, 2)
             } else {
                 Label {
                     Text(h.reason.isEmpty ? "Für dieses Laufwerk sind keine Gesundheitsdaten verfügbar." : h.reason)
