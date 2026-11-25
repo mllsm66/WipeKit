@@ -64,3 +64,20 @@ Antwort: `201` mit `{"ok": true}`. Höchstens 20 MB pro Ereignis.
   "files": ["Loeschprotokoll.pdf", "Loeschprotokoll-ausfuehrlich.pdf"]
 }
 ```
+
+## Anmeldung und Tresor (im Browser)
+
+```
+master   = PBKDF2-SHA256(Passwort, vaultSalt, 600 000 Durchläufe, 32 Byte)
+authKey  = HKDF-SHA256(master, salt = authSalt, info = "WipeKit Hub auth", 32 Byte)   → an den Server
+vaultKey = HKDF-SHA256(master, salt = authSalt, info = "WipeKit Hub vault", 32 Byte)  → bleibt im Browser
+encPriv  = nonce (12) || AES-256-GCM(vaultKey, privater Schlüssel als PKCS#8)
+```
+
+Der Server speichert `PBKDF2-SHA256(authKey, Server-Salz, 100 000)` zum Vergleich sowie `encPriv`.
+Aus `authKey` lässt sich `vaultKey` nicht berechnen.
+
+## Mitteilungen
+
+Web Push nach RFC 8030 / 8291 (aes128gcm) / 8292 (VAPID). Inhalt: `{"title", "body", "url", "tag"}` –
+`body` ist die kurze Mitteilung aus dem Ereignis.

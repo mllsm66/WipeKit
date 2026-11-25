@@ -185,6 +185,12 @@ enum SmokeTest {
         } catch {
             failures.append("Hub-Verschlüsselung: \(error)")
         }
+        // Für die Gegenprobe mit einer unabhängigen Umsetzung (tests/hub_crypto.py)
+        if let pubB64 = env["WIPEKIT_HUB_TEST_PUB"], let out = env["WIPEKIT_HUB_TEST_OUT"],
+           let pub = Data(base64Encoded: pubB64.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            do { try Push.seal(Data("WipeKit Hub Test".utf8), to: pub).write(to: URL(fileURLWithPath: out)) }
+            catch { failures.append("Hub-Testdatei: \(error)") }
+        }
         if Updater.compare("1.10.0", "1.9.3") <= 0 || Updater.compare("1.2.0", "1.2") != 0 { failures.append("Versionsvergleich") }
 
         for j in model.jobs { j.stop() }

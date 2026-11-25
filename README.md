@@ -59,9 +59,31 @@ WipeKit überschreibt ein komplettes Laufwerk so, dass sich die bisherigen Daten
 | **Löschprotokoll (ausführlich)** | Zusätzlich alle Gesundheitswerte vor und nach dem Löschen |
 | **Prüfprotokoll** | Ergebnis von »Nur prüfen« bzw. Oberflächentest |
 
-Ablage: `Dokumente/WipeKit-Protokolle/PDF` und `Dokumente/WipeKit-Protokolle/Text`.
+Ablage: `Dokumente/WipeKit-Protokolle/PDF` und `Dokumente/WipeKit-Protokolle/Text` (in den Einstellungen änderbar).
 Dateiname: `Datum_Uhrzeit_HERSTELLER-MODELL-GRÖSSE-SERIENNUMMER_Berichtsart`, z. B.
 `2026-11-12_03-03_WESTERN-DIGITAL-WD5000AAKX-00ERMA0-500GB-WD-WCC2EXX12345_Loeschprotokoll.pdf`
+(die Seriennummer im Dateinamen lässt sich abschalten). Auf Wunsch stehen „Durchgeführt von“, Firma und
+eine Notiz (z. B. Auftragsnummer) im Protokoll.
+
+### Mitteilungen und Benachrichtigungen aufs Handy
+
+- **Mitteilung am Rechner**, wenn ein Vorgang endet oder abbricht – am Mac oben rechts, unter Windows
+  unten rechts, unter Linux über die Benachrichtigungen des Desktops. Auf Mac und Linux auch dann,
+  wenn WipeKit während des Vorgangs geschlossen wurde.
+- **Aufs Handy** (in den Einstellungen wählbar):
+  - **[WipeKit Hub](https://github.com/mllsm66/WipeKit-Hub)** – selbst gehostet, mit Übersicht, Bildern und
+    beiden PDF-Protokollen. Protokolle und Laufwerksdaten werden **Ende-zu-Ende-verschlüsselt**; nur dein
+    Browser kann sie öffnen. Mitteilungen kommen beim iPhone über Apple, ohne Verbindung im Hintergrund.
+  - **ntfy** (öffentlicher oder eigener Server) – nur die kurze Mitteilung.
+  - **Discord** (Webhook) – nur die kurze Mitteilung.
+- Zugangsdaten liegen im Schlüsselbund des Systems (macOS-Schlüsselbund, unter Windows mit DPAPI
+  verschlüsselt, unter Linux im Secret Service).
+
+### Updates
+
+„Nach Updates suchen …“ (Mac: App-Menü, Windows und Linux: Einstellungen bzw. Hauptmenü). Beim ersten Start
+fragt WipeKit, ob es selbst nach Updates suchen und sie installieren soll. Jedes Update wird vor der
+Installation anhand seiner **digitalen Signatur** geprüft; während eines Vorgangs wird nie installiert.
 
 ## Unterschiede zwischen den Systemen
 
@@ -103,7 +125,7 @@ Windows SmartScreen warnt eventuell: *»Der Computer wurde durch Windows geschü
 - **Ubuntu / Debian / Mint**: `WipeKit-Linux-….deb` herunterladen und per Doppelklick installieren.
   Oder im Terminal: `sudo apt install ./WipeKit-Linux-….deb`
 - **Andere Distributionen**: `WipeKit-Linux-….tar.gz` entpacken und `sudo ./install.sh` ausführen.
-  Voraussetzungen: Python 3, PyGObject, GTK 4, libadwaita ≥ 1.4 und `smartmontools` (für die Firmware-Löschung zusätzlich `hdparm` und `nvme-cli`).
+  Voraussetzungen: Python 3, PyGObject, GTK 4, libadwaita ≥ 1.4, `python3-cryptography` und `smartmontools` (für die Firmware-Löschung zusätzlich `hdparm` und `nvme-cli`).
 
 ## Wichtig zu SSDs
 

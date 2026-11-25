@@ -178,3 +178,48 @@ class ReportTests(unittest.TestCase):
 if __name__ == "__main__":
     os.environ.setdefault("TZ", "Europe/Berlin")
     unittest.main(verbosity=2)
+
+
+class JobFinishTests(unittest.TestCase):
+    """Abschluss im Arbeitsprozess: Protokolle, finish.json, Zugangsdaten entfernen"""
+
+    def test_finish_creates_reports(self):
+        import json as _json
+        import jobfinish
+        from common import HelperStatus
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp) / "job"
+            job.mkdir()
+            disk = {"name": "sdb", "path": "/dev/sdb", "model": "WDC WD5000AAKX-00ERMA0", "size": 500107862016,
+                    "bus": "USB", "is_ssd": False, "transport": "usb", "serial": "WD-1"}
+            (job / "job.json").write_text(_json.dumps({"id": "x", "disk": disk, "mode": "secure",
+                                                       "createdAt": time.time() - 60, "purpose": ""}))
+            (job / "smart-before.json").write_text((FX / "smartctl-hdd.json").read_text())
+            settings = {"detailed": True, "serialInFileName": False, "meta": [["Durchgeführt von", "Ben"]],
+                        "notifyLocal": False, "push": {"service": "off"}, "host": "test", "platform": "Linux",
+                        "appVersion": "9.9.9", "uid": 0}
+            (job / jobfinish.SETTINGS_FILE).write_text(_json.dumps(settings))
+            st = HelperStatus(state="done", startedAt=time.time() - 50, finishedAt=time.time(), verified=True,
+                              bytesDoneTotal=10, bytesTotal=10, diskSize=500107862016)
+            written = []
+            fin = jobfinish.finish(job, st, "done", "Alles gut.", lambda: written.append(1))
+            self.assertEqual(written, [1])
+            self.assertEqual(len(fin["files"]), 2)
+            self.assertFalse((job / jobfinish.SETTINGS_FILE).exists())
+            saved = _json.loads((job / jobfinish.FINISH_FILE).read_text())
+            self.assertEqual(saved["files"][0]["title"], "Löschprotokoll")
+            pdf = Path(saved["files"][0]["pdf"])
+            self.assertTrue(pdf.exists())
+            self.assertNotIn("WCC2EXX12345", pdf.name)          # Seriennummer abgeschaltet
+            txt = Path(saved["files"][1]["txt"]).read_text()
+            self.assertIn("Durchgeführt von", txt)
+            head, body, warn = jobfinish.notice(_json.loads((job / "job.json").read_text()), "done", "", st,
+                                                hl.parse_text((FX / "smartctl-hdd.json").read_text()))
+            self.assertIn("erfolgreich gelöscht", body)
+
+    def test_push_validation(self):
+        import push
+        self.assertTrue(push.valid_discord("https://discord.com/api/webhooks/1/abc"))
+        self.assertFalse(push.valid_discord("https://evil.example/api/webhooks/1/abc"))
+        self.assertIsNone(push.parse_hub_code("WKHUB1:nonsense"))
+        self.assertEqual(push.send({"service": "ntfy", "onDone": False}, {"state": "done"}), None)

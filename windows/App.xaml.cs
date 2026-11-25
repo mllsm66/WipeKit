@@ -35,6 +35,23 @@ namespace WipeKit
                 return;
             }
 
+            // Gegenprobe der Hub-Verschlüsselung (tests/hub_crypto.py)
+            if (args.Length >= 3 && args[0] == "--hub-seal")
+            {
+                try
+                {
+                    var sealedBytes = Push.Seal(System.Text.Encoding.UTF8.GetBytes("WipeKit Hub Test"), Convert.FromBase64String(args[1].Trim()));
+                    File.WriteAllBytes(args[2], sealedBytes);
+                    Shutdown(0);
+                }
+                catch (Exception ex)
+                {
+                    File.WriteAllText(args[2] + ".err", ex.ToString());
+                    Shutdown(1);
+                }
+                return;
+            }
+
             if (args.Length >= 3 && args[0] == "--disk-test")
             {
                 Shutdown(SelfTests.DiskTest(int.Parse(args[1]), args[2]));

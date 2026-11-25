@@ -65,8 +65,12 @@ jobs:
           WIPEKIT_REPORTS: ${{ github.workspace }}/screenshots/berichte
           WIPEKIT_FIXTURES: ${{ github.workspace }}/tests/fixtures
         run: |
+          python3 -m pip install --quiet --user --break-system-packages cryptography || python3 -m pip install --quiet --user cryptography
+          python3 tests/hub_crypto.py keygen "$RUNNER_TEMP/hub"
+          export WIPEKIT_HUB_TEST_PUB="$(cat "$RUNNER_TEMP/hub/pub.b64")" WIPEKIT_HUB_TEST_OUT="$RUNNER_TEMP/hub/mac.bin"
           macos/build/WipeKit.app/Contents/MacOS/WipeKit --smoke-test
           ls -la screenshots screenshots/berichte/PDF
+          python3 tests/hub_crypto.py open "$RUNNER_TEMP/hub" "$RUNNER_TEMP/hub/mac.bin" "WipeKit Hub Test"
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -226,6 +230,20 @@ jobs:
           $err = Join-Path $env:TEMP 'WipeKit-Fehler.log'
           if (Test-Path $err) { Get-Content $err }
           if ($p.ExitCode -ne 0) { throw "Oberflächen-Test fehlgeschlagen (Code $($p.ExitCode))" }
+
+      - name: Hub-Verschlüsselung gegenprüfen
+        shell: pwsh
+        run: |
+          python -m pip install --quiet cryptography
+          $dir = Join-Path $env:RUNNER_TEMP 'hub'
+          python tests\hub_crypto.py keygen $dir
+          $pub = (Get-Content (Join-Path $dir 'pub.b64') -Raw).Trim()
+          $out = Join-Path $dir 'win.bin'
+          $p = Start-Process -FilePath dist\win\WipeKit.exe -ArgumentList @('--hub-seal', $pub, $out) -Wait -PassThru
+          if (Test-Path "$out.err") { Get-Content "$out.err" }
+          if ($p.ExitCode -ne 0) { throw "Verschlüsseln fehlgeschlagen" }
+          python tests\hub_crypto.py open $dir $out "WipeKit Hub Test"
+          if ($LASTEXITCODE -ne 0) { throw "Gegenprobe fehlgeschlagen" }
 
       - uses: actions/upload-artifact@v7
         if: always()
