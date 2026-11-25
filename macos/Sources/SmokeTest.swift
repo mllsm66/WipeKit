@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CryptoKit
 
 /// Nur für die automatische Prüfung (CI): baut alle Ansichten mit Beispieldaten auf,
 /// speichert Bildschirmfotos (WIPEKIT_SHOTS) und Berichte (WIPEKIT_REPORTS).
@@ -150,6 +151,41 @@ enum SmokeTest {
         let name = Reports.baseName(Reports.identity(health: model.healthByDisk["disk4"]?.health, model: "", size: 0, serial: ""),
                                     Date(timeIntervalSince1970: 0))
         if !name.hasSuffix("_WESTERN-DIGITAL-WD5000AAKX-00ERMA0-500GB-WD-WCC2EXX12345") { failures.append("Dateiname: \(name)") }
+
+        // Einstellungen (Bildschirmfotos)
+        NotifySettings.shared.config.service = .ntfy
+        NotifySettings.shared.config.ntfyTopic = "wipekit-7f3a9c21e4"
+        for (tab, name) in [(1, "macos-8-einstellungen-loeschen"), (3, "macos-9-einstellungen-benachrichtigungen"),
+                            (4, "macos-10-einstellungen-updates")] {
+            let sw = NSWindow(contentRect: NSRect(x: 140, y: 140, width: 560, height: 560),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            sw.appearance = NSAppearance(named: .aqua)
+            sw.title = "Einstellungen"
+            sw.contentView = NSHostingView(rootView: SettingsView(tab: tab))
+            sw.makeKeyAndOrderFront(nil)
+            spin(1.0)
+            if let dir = shots, let view = sw.contentView?.superview ?? sw.contentView,
+               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent(name + ".png"))
+            }
+            sw.orderOut(nil)
+        }
+        // Verschlüsselung für den Hub: Schlüsselpaar, versiegeln, prüfen
+        do {
+            let hubKey = P256.KeyAgreement.PrivateKey()
+            let blob = try Push.seal(Data("Hallo Hub".utf8), to: hubKey.publicKey.x963Representation)
+            if !blob.starts(with: Data("WKE1".utf8)) || blob.count != 4 + 65 + 12 + 9 + 16 { failures.append("Hub-Verschlüsselung: Länge \(blob.count)") }
+            let eph = try P256.KeyAgreement.PublicKey(x963Representation: blob[4..<69])
+            let shared = try hubKey.sharedSecretFromKeyAgreement(with: eph)
+            let key = shared.hkdfDerivedSymmetricKey(using: SHA256.self, salt: Data(blob[4..<69]) + hubKey.publicKey.x963Representation,
+                                                     sharedInfo: Data("WipeKit Hub v1".utf8), outputByteCount: 32)
+            let plain = try AES.GCM.open(AES.GCM.SealedBox(combined: blob[69...]), using: key, authenticating: Data("WKE1".utf8))
+            if String(data: plain, encoding: .utf8) != "Hallo Hub" { failures.append("Hub-Entschlüsselung") }
+        } catch {
+            failures.append("Hub-Verschlüsselung: \(error)")
+        }
+        if Updater.compare("1.10.0", "1.9.3") <= 0 || Updater.compare("1.2.0", "1.2") != 0 { failures.append("Versionsvergleich") }
 
         for j in model.jobs { j.stop() }
         if failures.isEmpty {

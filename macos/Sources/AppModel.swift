@@ -156,11 +156,11 @@ final class AppModel: ObservableObject {
         didSet {
             // Passenden Modus vorschlagen, wenn ein anderes Laufwerk gewählt wird
             guard selection != oldValue, let d = selectedDisk else { return }
-            if d.isSSD == true { mode = .ssd } else if mode == .ssd { mode = .secure }
+            if d.isSSD == true { mode = .ssd } else if mode == .ssd { mode = AppSettings.shared.defaultMode == .ssd ? .secure : AppSettings.shared.defaultMode }
             if view == .diag { ensureHealth(d) }
         }
     }
-    @Published var mode: WipeMode = .secure
+    @Published var mode: WipeMode = AppSettings.shared.defaultMode
     @Published var jobs: [WipeJob] = []
     @Published var isRefreshing = false
     @Published var showConfirm = false
@@ -196,6 +196,7 @@ final class AppModel: ObservableObject {
         try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
         if AppModel.demoMode { return }
+        startHeartbeat()
         restoreJobs()
         refresh()
         watcher = DiskWatcher { [weak self] in self?.scheduleRefresh() }
@@ -289,6 +290,7 @@ final class AppModel: ObservableObject {
             return
         }
 
+        JobSettings.current().write(to: dir)
         let job = WipeJob(info: info, dir: dir)
         attach(job)
         jobs.insert(job, at: 0)
@@ -339,6 +341,15 @@ final class AppModel: ObservableObject {
 
     func removeFinished() {
         for j in jobs where !j.state.isActive { remove(j) }
+    }
+
+    /// Zeigt dem Lösch-Prozess, dass WipeKit läuft (dann meldet sich die App selbst)
+    private var heartbeat: Timer?
+    private func startHeartbeat() {
+        let url = baseDir.appendingPathComponent("app-alive")
+        let beat = { FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: [.posixPermissions: 0o644]) }
+        _ = beat()
+        heartbeat = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in _ = beat() }
     }
 
     // MARK: Wiederherstellen nach Neustart der App
@@ -393,22 +404,39 @@ final class AppModel: ObservableObject {
         guard !job.alreadyReported else { return }
         job.alreadyReported = true
 
-        if let h = loadHealth(job.dir.appendingPathComponent("smart-after.json")), h.available {
-            let entry = healthModel(job.disk.id)
+        let before = loadHealth(job.dir.appendingPathComponent("smart-before.json"))
+        let after = loadHealth(job.dir.appendingPathComponent("smart-after.json"))
+        if let h = after, h.available {
+            let entry = healthModel(job.status?.diskNow ?? job.disk.id)
             entry.health = h
             entry.readAt = Date()
         }
-        let rep = writeReports(for: job)
+        let fin = FinishInfo.load(job.dir)
+        let rep = collectReports(for: job, fin: fin, before: before, after: after)
         job.reports = rep
         if let p = rep["pdf"] { job.protocolURL = URL(fileURLWithPath: p) }
         if let data = try? JSONEncoder().encode(rep) {
             try? data.write(to: job.dir.appendingPathComponent("reports.json"))
         }
 
+        // War WipeKit geschlossen, hat sich der Vorgang schon selbst gemeldet
+        if fin?.notifiedLocal == true {
+            objectWillChange.send()
+            return
+        }
+        let settings = AppSettings.shared
+        let health = (after?.available == true) ? after : before
+        let n = JobFinish.notice(info: job.info, state: job.state, message: job.message, status: job.status, health: health)
+        if settings.playSound {
+            NSSound(named: NSSound.Name(job.state == .done && !job.foundProblem && !n.warning ? "Glass" : "Basso"))?.play()
+        }
+        if settings.notifyLocal && !NSApplication.shared.isActive {
+            LocalNotify.post(title: n.title, body: n.body, sound: false)
+        }
+
         let d = job.info.disk
         switch job.state {
         case .done:
-            NSSound(named: NSSound.Name(job.foundProblem ? "Basso" : "Glass"))?.play()
             var text = job.kind == .wipe
                 ? "\(d.name) (\(d.id), \(Fmt.bytes(d.size))) wurde erfolgreich gelöscht."
                 : "\(d.name): \(job.message ?? job.doneText)"
@@ -418,82 +446,61 @@ final class AppModel: ObservableObject {
                                                  : "\nKontrolle: \(job.status?.sampleResult ?? "bestanden")"
             }
             if job.info.mode.trims, let t = job.status?.trimResult { text += "\nTRIM: \(t)" }
+            if let p = fin?.push, p != "ok" { text += "\n\nBenachrichtigung aufs Handy fehlgeschlagen: \(p)" }
             enqueueAlert(job.kind == .wipe ? "Löschen abgeschlossen" : "\(job.title) abgeschlossen", text)
         case .cancelled:
             enqueueAlert("\(job.title) abgebrochen", "\(d.name) (\(d.id)): \(job.message ?? "")")
         default:
-            NSSound(named: NSSound.Name("Basso"))?.play()
             enqueueAlert("\(job.title) fehlgeschlagen", "\(d.name) (\(d.id)): \(job.message ?? "Unbekannter Fehler")")
         }
         NSApplication.shared.requestUserAttention(.criticalRequest)
         objectWillChange.send()
     }
 
-    func loadHealth(_ url: URL) -> Health? {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
-        return HealthParser.parse(data: data)
-    }
-
-    private func writeReports(for job: WipeJob) -> [String: String] {
-        let d = job.info.disk
-        let s = job.status
-        let started = s?.startedAt ?? job.info.createdAt
-        let ended = s?.finishedAt ?? Date()
-        let before = loadHealth(job.dir.appendingPathComponent("smart-before.json"))
-        let after = loadHealth(job.dir.appendingPathComponent("smart-after.json"))
-        var verification = "nicht vorgesehen"
-        switch job.mode.verify {
-        case .full:
-            switch s?.verified {
-            case .some(true):
-                verification = job.mode.passes.last == .seeded
-                    ? "bestanden – alle Sektoren gelesen und mit den geschriebenen Zufallsdaten verglichen"
-                    : "bestanden – alle Sektoren gelesen, alle enthalten Nullen"
-            case .some(false): verification = "NICHT bestanden"
-            case .none: verification = "nicht durchgeführt"
-            }
-        case .samples:
-            verification = s?.sampleResult ?? "nicht durchgeführt"
-        case .none: break
-        }
-        var w = WipeRecord(modeTitle: job.kind == .check ? job.title : job.mode.title, method: job.mode.methodDescription,
-                           standard: job.mode.standard, state: job.state, started: started, ended: ended)
-        w.bytesWritten = s?.bytesDoneTotal ?? 0
-        w.message = job.message ?? ""
-        w.verification = verification
-        w.trim = job.mode.trims ? (s?.trimResult ?? "nicht durchgeführt") : ""
-        w.device = "/dev/\(d.id)"
-        w.bus = d.bus + (d.isInternal ? " (intern)" : "")
-        w.typeLabel = d.typeLabel
-        w.volumes = d.volumes
-        w.exactSize = (s?.diskSize ?? 0) > 0 ? s!.diskSize : d.size
-        w.hiddenArea = s?.hiddenArea ?? ""
-        w.host = MacInfo.host
-        w.platform = MacInfo.osLabel
-        w.appVersion = AppModel.appVersion
-        w.readOnly = job.mode.readOnly
-        if job.mode.readOnly {
-            w.badBlocks = s?.badBlocks
-            w.nonZero = s?.nonZeroBytes
-        }
-        w.purgeMethod = s?.purgeMethod ?? ""
-        let ident = Reports.identity(health: before ?? after, model: d.name, size: d.size, serial: "")
+    /// Protokolle in den Berichte-Ordner: vom Lösch-Prozess erstellte übernehmen, sonst selbst erstellen
+    private func collectReports(for job: WipeJob, fin: FinishInfo?, before: Health?, after: Health?) -> [String: String] {
+        guard let folder = Reports.folder else { return ["error": "Kein Ordner für Berichte."] }
         var out: [String: String] = [:]
+        func put(_ index: Int, _ title: String, _ pdf: URL, _ txt: URL) {
+            if index == 0 { out["pdf"] = pdf.path; out["txt"] = txt.path; out["title"] = title }
+            else { out["pdf_full"] = pdf.path; out["txt_full"] = txt.path }
+        }
+        if let fin = fin, !fin.files.isEmpty {
+            let fm = FileManager.default
+            let pdfDir = folder.appendingPathComponent("PDF", isDirectory: true)
+            let txtDir = folder.appendingPathComponent("Text", isDirectory: true)
+            do {
+                try fm.createDirectory(at: pdfDir, withIntermediateDirectories: true)
+                try fm.createDirectory(at: txtDir, withIntermediateDirectories: true)
+                for (i, f) in fin.files.enumerated() {
+                    let srcP = URL(fileURLWithPath: f.pdf), srcT = URL(fileURLWithPath: f.txt)
+                    let dp = Reports.unique(pdfDir.appendingPathComponent(srcP.lastPathComponent))
+                    let dt = Reports.unique(txtDir.appendingPathComponent(srcT.lastPathComponent))
+                    try fm.copyItem(at: srcP, to: dp)
+                    try fm.copyItem(at: srcT, to: dt)
+                    put(i, f.title, dp, dt)
+                }
+                return out
+            } catch {
+                out = ["error": error.localizedDescription]
+            }
+        }
         do {
-            if job.mode.readOnly {
-                let (pdf, txt) = try Reports.save(Reports.wipeReport(w, identity: ident, before: before, after: after, detailed: true))
-                out = ["pdf": pdf.path, "txt": txt.path, "title": "Prüfprotokoll"]
-            } else {
-                let (pdf, txt) = try Reports.save(Reports.wipeReport(w, identity: ident, before: before, after: after, detailed: false))
-                out = ["pdf": pdf.path, "txt": txt.path, "title": "Löschprotokoll"]
-                let (pdf2, txt2) = try Reports.save(Reports.wipeReport(w, identity: ident, before: before, after: after, detailed: true))
-                out["pdf_full"] = pdf2.path
-                out["txt_full"] = txt2.path
+            let list = JobFinish.reports(info: job.info, status: job.status, state: job.state, message: job.message,
+                                         before: before, after: after, settings: JobSettings.current())
+            for (i, (title, r)) in list.enumerated() {
+                let (pdf, txt) = try Reports.save(r)
+                put(i, title, pdf, txt)
             }
         } catch {
             out["error"] = error.localizedDescription
         }
         return out
+    }
+
+    func loadHealth(_ url: URL) -> Health? {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+        return HealthParser.parse(data: data)
     }
 
     // MARK: Diagnose
@@ -593,7 +600,7 @@ final class AppModel: ObservableObject {
         let h = healthByDisk[disk.id]?.health
         let ident = Reports.identity(health: h, model: disk.name, size: disk.size, serial: "")
         let r = Reports.healthReport(h, identity: ident, appVersion: AppModel.appVersion,
-                                     platform: MacInfo.osLabel, host: MacInfo.host)
+                                     platform: MacInfo.osLabel, host: MacInfo.host, meta: AppSettings.shared.reportMeta)
         do {
             let (pdf, _) = try Reports.save(r)
             NSWorkspace.shared.open(pdf)

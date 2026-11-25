@@ -77,6 +77,15 @@ cp ../assets/report-logo.jpg "$APP/Contents/Resources/report-logo.jpg"
 cp ../THIRD-PARTY-NOTICES.md ../LICENSE "$APP/Contents/Resources/" 2>/dev/null || true
 if [ -f ../licenses/GPL-2.0.txt ]; then mkdir -p "$APP/Contents/Resources/Lizenzen"; cp ../licenses/GPL-2.0.txt "$APP/Contents/Resources/Lizenzen/"; fi
 rm -f "${built[@]}"
+# Öffentlicher Schlüssel für die Prüfung von Updates (aus dem geheimen Signaturschlüssel abgeleitet)
+if [ -n "${UPDATE_SIGNING_KEY:-}" ]; then
+  printf '%s\n' "$UPDATE_SIGNING_KEY" | openssl ec -pubout -out "$APP/Contents/Resources/update-public-key.pem" 2>/dev/null \
+    && echo "▶︎ Update-Schlüssel eingebaut" || echo "⚠️  Update-Schlüssel ungültig – automatische Updates aus."
+elif [ -f update-public-key.pem ]; then
+  cp update-public-key.pem "$APP/Contents/Resources/"
+else
+  echo "▶︎ Ohne Update-Schlüssel gebaut – Updates nur über die GitHub-Seite."
+fi
 cp Info.plist "$APP/Contents/Info.plist"
 # Versionsnummer setzen (z. B. VERSION=1.0.0 bash build.sh)
 if [ -n "${VERSION:-}" ]; then

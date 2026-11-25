@@ -78,6 +78,8 @@ struct WipeRecord {
     var badBlocks: Int? = nil
     var nonZero: UInt64? = nil
     var purgeMethod: String = ""
+    /// „Durchgeführt von“, „Firma / Organisation“, „Notiz“ (aus den Einstellungen)
+    var meta: [(String, String)] = []
 }
 
 enum Reports {
@@ -128,9 +130,9 @@ enum Reports {
         return out.uppercased()
     }
 
-    static func baseName(_ i: ReportIdentity, _ when: Date) -> String {
+    static func baseName(_ i: ReportIdentity, _ when: Date, serial: Bool = true) -> String {
         let parts = [slug(i.vendor == "Unbekannt" ? "" : i.vendor), slug(i.model),
-                     i.size > 0 ? "\(Int((Double(i.size) / 1e9).rounded()))GB" : "", slug(i.serial)]
+                     i.size > 0 ? "\(Int((Double(i.size) / 1e9).rounded()))GB" : "", serial ? slug(i.serial) : ""]
         var name = parts.filter { !$0.isEmpty }.joined(separator: "-")
         if name.isEmpty { name = "LAUFWERK" }
         let f = DateFormatter()
@@ -143,18 +145,18 @@ enum Reports {
         if let env = ProcessInfo.processInfo.environment["WIPEKIT_REPORTS"], !env.isEmpty {
             return URL(fileURLWithPath: env, isDirectory: true)
         }
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("WipeKit-Protokolle", isDirectory: true)
+        let p = AppSettings.shared.reportsPath
+        return URL(fileURLWithPath: p.isEmpty ? AppSettings.defaultReportsPath : p, isDirectory: true)
     }
 
     /// Speichert PDF und Text. Gibt (PDF, Text) zurück.
-    static func save(_ r: Report, to base: URL? = nil) throws -> (URL, URL) {
+    static func save(_ r: Report, to base: URL? = nil, serial: Bool? = nil) throws -> (URL, URL) {
         guard let root = base ?? folder else { throw CocoaError(.fileNoSuchFile) }
         let pdfDir = root.appendingPathComponent("PDF", isDirectory: true)
         let txtDir = root.appendingPathComponent("Text", isDirectory: true)
         try FileManager.default.createDirectory(at: pdfDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: txtDir, withIntermediateDirectories: true)
-        let name = baseName(r.identity, r.created) + "_" + r.kind.fileSuffix
+        let name = baseName(r.identity, r.created, serial: serial ?? AppSettings.shared.serialInFileName) + "_" + r.kind.fileSuffix
         let pdf = unique(pdfDir.appendingPathComponent(name + ".pdf"))
         let txt = unique(txtDir.appendingPathComponent(name + ".txt"))
         try renderPDF(r).write(to: pdf)
@@ -162,7 +164,7 @@ enum Reports {
         return (pdf, txt)
     }
 
-    private static func unique(_ u: URL) -> URL {
+    static func unique(_ u: URL) -> URL {
         guard FileManager.default.fileExists(atPath: u.path) else { return u }
         let stem = u.deletingPathExtension().lastPathComponent, ext = u.pathExtension
         for i in 2..<100 {
@@ -234,13 +236,13 @@ enum Reports {
     }
 
     static func healthReport(_ h: Health?, identity: ReportIdentity, appVersion: String, platform: String,
-                             host: String, created: Date = Date()) -> Report {
+                             host: String, created: Date = Date(), meta: [(String, String)] = []) -> Report {
         var r = Report(kind: .health, created: created, identity: identity, rating: h?.rating ?? .unknown,
                        ratingNote: note(h))
         r.sections = healthSections(h)
         r.sections.append(ReportSection(title: "Bericht", blocks: [.kv([
             ("Erstellt", dt(created, seconds: true)), ("Rechner", host.isEmpty ? "–" : host),
-            ("System", platform.isEmpty ? "–" : platform), ("Programm", "WipeKit \(appVersion)")])]))
+            ("System", platform.isEmpty ? "–" : platform), ("Programm", "WipeKit \(appVersion)")] + meta)]))
         r.footer = "WipeKit \(appVersion)"
         return r
     }
@@ -322,11 +324,14 @@ enum Reports {
         }
         if compact {
             let line = "Erstellt am \(dt(r.created, seconds: true)) auf »\(w.host.isEmpty ? "–" : w.host)« (\(w.platform.isEmpty ? "–" : w.platform)) mit WipeKit \(w.appVersion)."
-            r.sections.append(ReportSection(title: "Protokoll", blocks: [.text(line + " " + notCertified)]))
+            var blocks: [ReportBlock] = []
+            if !w.meta.isEmpty { blocks.append(.kv(w.meta)) }
+            blocks.append(.text(line + " " + notCertified))
+            r.sections.append(ReportSection(title: "Protokoll", blocks: blocks))
         } else {
             r.sections.append(ReportSection(title: "Protokoll", blocks: [.kv([
                 ("Erstellt", dt(r.created, seconds: true)), ("Rechner", w.host.isEmpty ? "–" : w.host),
-                ("System", w.platform.isEmpty ? "–" : w.platform), ("Programm", "WipeKit \(w.appVersion)")]), .text(notCertified)]))
+                ("System", w.platform.isEmpty ? "–" : w.platform), ("Programm", "WipeKit \(w.appVersion)")] + w.meta), .text(notCertified)]))
         }
         r.footer = "WipeKit \(w.appVersion)"
         return r

@@ -405,7 +405,7 @@ final class WipeEngine {
     private func saveHealthBefore(unmount: Bool) -> String? {
         guard diskValidated, !allowDiskImage || SmartService.smartctlPath != nil else { return nil }
         let (h, raw) = SmartService.read(disk)
-        guard !h.available, !allowDiskImage, DiskService.usbLocation(disk) != nil else {
+        guard !h.available, !allowDiskImage, jobSettings?.usbHealth ?? true, DiskService.usbLocation(disk) != nil else {
             saveSmart("smart-before.json", raw)
             return nil
         }
@@ -447,7 +447,7 @@ final class WipeEngine {
         guard diskValidated, !allowDiskImage || SmartService.smartctlPath != nil else { return }
         closeRaw()
         var (h, raw) = SmartService.read(disk)
-        if !h.available && usbHealthWorks {
+        if !h.available && usbHealthWorks && (jobSettings?.usbHealth ?? true) {
             status.phase = "Gesundheitsdaten werden über den USB-Adapter gelesen …"
             writeStatus()
             let r = SmartService.readViaUSB(disk, forceUnmount: true)
@@ -776,7 +776,79 @@ final class WipeEngine {
         status.finishedAt = Date()
         status.sleepPrevented = false
         if state == .done { status.bytesDoneTotal = status.bytesTotal }
+
+        // Protokolle zuerst (die App übernimmt sie, sobald sie „fertig“ sieht), dann der Status
+        var fin = FinishInfo()
+        let settings = jobSettings
+        let info = jobInfo
+        var health: Health?
+        var pdfs: [(String, Data)] = []
+        if let settings = settings, let info = info {
+            let before = loadHealth("smart-before.json"), after = loadHealth("smart-after.json")
+            health = (after?.available == true) ? after : before
+            let out = dir.appendingPathComponent("reports", isDirectory: true)
+            for (title, r) in JobFinish.reports(info: info, status: status, state: state, message: message,
+                                                before: before, after: after, settings: settings) {
+                if let (pdf, txt) = try? Reports.save(r, to: out, serial: settings.serialInFileName) {
+                    fin.files.append(.init(title: title, pdf: pdf.path, txt: txt.path))
+                    if let data = try? Data(contentsOf: pdf) { pdfs.append((pdf.lastPathComponent, data)) }
+                }
+            }
+            fin.notifiedLocal = settings.notifyLocal && !appIsRunning()
+            // Dem Benutzer überlassen (die App verschiebt und löscht sie später)
+            if settings.uid > 0 { Shell.run("/usr/sbin/chown", ["-R", String(settings.uid), out.path]) }
+        }
+        writeFinish(fin)
         writeStatus()
+
+        // Danach: Mitteilung, Handy, Auswerfen
+        if let settings = settings, let info = info {
+            let n = JobFinish.notice(info: info, state: state, message: message, status: status, health: health)
+            if fin.notifiedLocal {
+                LocalNotify.postAsUser(uid: settings.uid, title: n.title, body: n.body, sound: settings.playSound)
+            }
+            if settings.push.service != .off {
+                let ev = PushEvent(kind: info.mode.readOnly ? "check" : "wipe", state: state.rawValue, warning: n.warning,
+                                   notice: n.body,
+                                   meta: JobFinish.hubMeta(info: info, state: state, status: status, health: health, settings: settings),
+                                   files: pdfs)
+                fin.push = Push.send(settings.push, ev) ?? "ok"
+                print("Benachrichtigung: \(fin.push ?? "-")")
+                writeFinish(fin)
+            }
+            if state == .done && !info.mode.readOnly && settings.eject && diskValidated {
+                closeRaw()
+                Shell.run("/usr/sbin/diskutil", ["eject", "/dev/\(disk)"])
+            }
+        }
+        // Zugangsdaten nicht liegen lassen
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(JobSettings.fileName))
         return state == .done ? 0 : 1
+    }
+
+    private lazy var jobSettings: JobSettings? = JobSettings.load(dir)
+    private lazy var jobInfo: JobInfo? = {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("job.json")) else { return nil }
+        return try? JSONDecoder().decode(JobInfo.self, from: data)
+    }()
+
+    private func loadHealth(_ name: String) -> Health? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent(name)), !data.isEmpty else { return nil }
+        return HealthParser.parse(data: data)
+    }
+
+    /// WipeKit meldet sich alle paar Sekunden („app-alive“ im übergeordneten Ordner)
+    private func appIsRunning() -> Bool {
+        let p = dir.deletingLastPathComponent().appendingPathComponent("app-alive").path
+        guard let a = try? FileManager.default.attributesOfItem(atPath: p), let m = a[.modificationDate] as? Date else { return false }
+        return Date().timeIntervalSince(m) < 20
+    }
+
+    private func writeFinish(_ f: FinishInfo) {
+        guard let data = try? JSONEncoder().encode(f) else { return }
+        let url = dir.appendingPathComponent(FinishInfo.fileName)
+        let tmp = url.path + ".tmp"
+        FileManager.default.createFile(atPath: tmp, contents: data, attributes: [.posixPermissions: 0o644])
+        rename(tmp, url.path)
     }
 }

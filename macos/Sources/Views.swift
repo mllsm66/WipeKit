@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 import AppKit
 
 // Hinweis: bewusst ohne SwiftUI-Makros (@State, #Preview …), damit der Build
@@ -20,6 +21,10 @@ struct WipeKitApp: App {
         .defaultSize(width: 1060, height: 760)
         .windowResizability(.contentMinSize)
         .commands { WipeKitCommands(model: model) }
+
+        Settings {
+            SettingsView()
+        }
     }
 }
 
@@ -29,6 +34,7 @@ struct WipeKitCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
             Button("Über WipeKit") { showAboutPanel() }
+            Button("Nach Updates suchen …") { showUpdateCheck() }
         }
         CommandGroup(replacing: .newItem) {}
         CommandMenu("Laufwerk") {
@@ -57,11 +63,54 @@ struct WipeKitCommands: Commands {
     }
 }
 
+/// „Nach Updates suchen …“: prüft und öffnet die Einstellungen mit dem Ergebnis
+func showUpdateCheck() {
+    Updater.shared.check(userInitiated: true) { r in
+        let alert = NSAlert()
+        if let r = r {
+            alert.messageText = "WipeKit \(r.version) ist verfügbar"
+            alert.informativeText = "Installiert ist Version \(AppModel.appVersion)."
+                + (Updater.shared.canInstall(r) ? "" : (AppModel.shared.hasActiveJobs
+                    ? " Installieren geht, sobald der laufende Vorgang beendet ist."
+                    : " Dieses Update lässt sich nicht automatisch installieren – lade es von GitHub."))
+            if Updater.shared.canInstall(r) {
+                alert.addButton(withTitle: "Installieren und neu starten")
+            } else {
+                alert.addButton(withTitle: "Auf GitHub öffnen")
+            }
+            alert.addButton(withTitle: "Später")
+            if alert.runModal() == .alertFirstButtonReturn { Updater.shared.install(r) }
+        } else {
+            alert.messageText = "Keine neue Version"
+            alert.informativeText = Updater.shared.statusText
+            alert.runModal()
+        }
+    }
+}
+
+/// Beim allerersten Start: automatisch nach Updates suchen?
+func askAboutUpdatesOnce() {
+    let s = AppSettings.shared
+    guard !s.updatesAsked, !AppModel.demoMode else { return }
+    s.updatesAsked = true
+    let alert = NSAlert()
+    alert.messageText = "Automatisch nach Updates suchen?"
+    alert.informativeText = "WipeKit kann bei jedem Start auf GitHub nach einer neuen Version suchen und sie installieren. Updates werden vorher anhand ihrer Signatur geprüft. Das lässt sich jederzeit in den Einstellungen ändern."
+    alert.addButton(withTitle: "Automatisch suchen")
+    alert.addButton(withTitle: "Nicht suchen")
+    alert.showsSuppressionButton = true
+    alert.suppressionButton?.title = "Updates auch automatisch installieren"
+    alert.suppressionButton?.state = .on
+    let answer = alert.runModal()
+    s.autoCheck = answer == .alertFirstButtonReturn
+    s.autoInstall = s.autoCheck && alert.suppressionButton?.state == .on
+}
+
 func showAboutPanel() {
     let credits = NSMutableAttributedString()
     let body: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]
     credits.append(NSAttributedString(string: "Laufwerke sicher löschen und ihre Gesundheit prüfen.\n\n", attributes: body))
-    credits.append(NSAttributedString(string: "Enthält smartctl aus smartmontools 7.5 (GPL-2.0-or-later, © Bruce Allen, Christian Franke u. a.) als eigenständiges Programm. Der Quelltext liegt jedem WipeKit-Release auf GitHub bei.\n\n", attributes: body))
+    credits.append(NSAttributedString(string: "Enthält smartctl aus smartmontools 7.5 (GPL-2.0-or-later, © Bruce Allen, Christian Franke u. a.) als eigenständiges Programm, ergänzt um den USB-Direktzugriff. Der Quelltext liegt jedem WipeKit-Release auf GitHub bei.\n\n", attributes: body))
     credits.append(NSAttributedString(string: "WipeKit steht unter der MIT-Lizenz. Ohne Gewähr.", attributes: body))
     NSApplication.shared.orderFrontStandardAboutPanel(options: [
         .credits: credits,
@@ -71,6 +120,16 @@ func showAboutPanel() {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !AppModel.demoMode else { return }
+        UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
+        if AppSettings.shared.notifyLocal { LocalNotify.requestPermission() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            askAboutUpdatesOnce()
+            Updater.shared.checkOnLaunch()
+        }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let active = AppModel.shared.jobs.filter { $0.state.isActive }.count
@@ -1173,7 +1232,7 @@ struct JobDetailView: View {
             } header: {
                 Text("Protokolle")
             } footer: {
-                Text("Gespeichert unter Dokumente › WipeKit-Protokolle (Unterordner „PDF“ und „Text“).")
+                Text("Gespeichert unter \((AppSettings.shared.reportsPath as NSString).abbreviatingWithTildeInPath) (Unterordner „PDF“ und „Text“).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

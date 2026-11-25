@@ -29,6 +29,8 @@ jobs:
           echo "VERSION=${V#v}" >> "$GITHUB_ENV"
 
       - name: "App bauen (Universal – Intel + Apple Silicon, inkl. smartctl)"
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: bash macos/build.sh
 
       - name: App-Paket prüfen
@@ -115,6 +117,19 @@ jobs:
           mkdir -p dist
           ditto -c -k --keepParent macos/build/WipeKit.app "dist/WipeKit-macOS-${VERSION}.zip"
           cp macos/vendor/smartmontools-7.5.tar.gz macos/vendor/smartmontools-7.5-wipekit.tar.gz dist/
+
+      - name: Update signieren
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then echo "Kein Signaturschlüssel (Secret UPDATE_SIGNING_KEY) – übersprungen."; exit 0; fi
+          umask 077; printf '%s\n' "$UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/k.pem"
+          openssl ec -in "$RUNNER_TEMP/k.pem" -pubout -out "$RUNNER_TEMP/pub.pem" 2>/dev/null
+          for f in dist/WipeKit-macOS-*.zip; do
+            openssl dgst -sha256 -sign "$RUNNER_TEMP/k.pem" -out "$f.sig" "$f"
+            openssl dgst -sha256 -verify "$RUNNER_TEMP/pub.pem" -signature "$f.sig" "$f"
+          done
+          rm -f "$RUNNER_TEMP/k.pem"
 
       - uses: actions/upload-artifact@v7
         with:
