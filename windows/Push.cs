@@ -123,7 +123,7 @@ namespace WipeKit
         {
             var hub = ParseHubCode(c.HubCode);
             if (hub == null) return "Der Kopplungscode für den Hub ist ungültig.";
-            var files = c.HubFiles ? e.Files : new List<(string, byte[])>();
+            var files = c.HubFiles ? e.Files : new List<(string Name, byte[] Data)>();
             var meta = new Dictionary<string, object>(e.Meta) { ["files"] = files.Select(f => f.Name).ToArray() };
             var body = new Dictionary<string, object>
             {

@@ -29,7 +29,13 @@ from common import (  # noqa: E402
     fmt_speed, list_disks, pid_alive, recommended_mode,
 )
 import health as hl  # noqa: E402
+import jobfinish  # noqa: E402
+import push  # noqa: E402
 import reports as rp  # noqa: E402
+import updater  # noqa: E402
+from settings import Settings  # noqa: E402
+
+SETTINGS = Settings()
 
 HERE = Path(__file__).resolve().parent
 HELPER = HERE / "wipekit-helper"
@@ -53,9 +59,16 @@ USB_HELP = ("Viele USB-Gehäuse und -Adapter geben die Gesundheitsdaten nicht we
             "JMicron- oder Realtek-Chip verwenden. Der Oberflächentest funktioniert auch ohne diese Daten.")
 
 
-def reports_folder() -> Path:
+def default_reports_folder() -> Path:
     docs = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS) or str(Path.home() / "Documents")
     return Path(docs) / "WipeKit-Protokolle"
+
+
+def reports_folder() -> Path:
+    env = os.environ.get("WIPEKIT_REPORTS")
+    if env:
+        return Path(env)
+    return SETTINGS.reports_folder or default_reports_folder()
 
 
 def os_label() -> str:
@@ -399,7 +412,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.jobs = []
         self.selection = None      # ("disk", name) | ("job", id)
         self.view = "wipe"         # "wipe" | "diag"
-        self.mode_key = "secure"
+        self.mode_key = SETTINGS["defaultMode"] if SETTINGS["defaultMode"] in MODES_BY_KEY else "secure"
         self.updating_lists = False
         self.force_close = False
         self.job_page_refs = {}
@@ -421,6 +434,10 @@ class MainWindow(Adw.ApplicationWindow):
         menu = Gio.Menu()
         menu.append("Gesundheitsdaten lesen", "win.read-health")
         menu.append("Ordner mit Berichten öffnen", "win.open-reports")
+        prefs = Gio.Menu()
+        prefs.append("Einstellungen", "win.preferences")
+        prefs.append("Nach Updates suchen …", "win.check-updates")
+        menu.append_section(None, prefs)
         section = Gio.Menu()
         section.append("Über WipeKit", "app.about")
         menu.append_section(None, section)
@@ -503,6 +520,18 @@ class MainWindow(Adw.ApplicationWindow):
             self.show_detail()
         GLib.timeout_add_seconds(1, self.tick)
         GLib.timeout_add_seconds(3, self.periodic_refresh)
+        self.heartbeat()
+        GLib.timeout_add_seconds(5, self.heartbeat)
+        if not app.smoke_test:
+            GLib.timeout_add_seconds(2, self.updates_on_launch)
+
+    def heartbeat(self):
+        """Zeigt dem Arbeitsprozess, dass WipeKit läuft (dann meldet sich die App selbst)."""
+        try:
+            (BASE_DIR / "app-alive").touch()
+        except OSError:
+            pass
+        return True
 
     # --- Aktionen und Tastenkürzel --------------------------------------------------
 
@@ -518,6 +547,8 @@ class MainWindow(Adw.ApplicationWindow):
         add("refresh", lambda: self.refresh_disks(force=True), ["F5", "<Control>r"])
         add("read-health", self.read_health, ["<Control><Shift>r"])
         add("open-reports", self.on_open_reports, ["<Control>o"])
+        add("preferences", self.show_preferences, ["<Control>comma"])
+        add("check-updates", lambda: self.check_updates(user=True))
 
     @staticmethod
     def _listbox():
@@ -714,7 +745,8 @@ class MainWindow(Adw.ApplicationWindow):
                 if d.is_ssd is True:
                     self.mode_key = rec
                 elif self.mode_key in ("ssd", "purge"):
-                    self.mode_key = "secure"
+                    dm = SETTINGS["defaultMode"]
+                    self.mode_key = dm if dm in MODES_BY_KEY and dm not in ("ssd", "purge") else "secure"
 
     def on_row_selected(self, listbox, r):
         if self.updating_lists or r is None:
@@ -1014,6 +1046,9 @@ class MainWindow(Adw.ApplicationWindow):
         try:
             job_dir.mkdir(mode=0o700)
             (job_dir / "job.json").write_text(json.dumps(info))
+            fd = os.open(job_dir / jobfinish.SETTINGS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(SETTINGS.job_settings(socket.gethostname(), os_label(), VERSION), f)
             log = open(job_dir / "pkexec.log", "w")
             proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             log.close()
@@ -1252,7 +1287,7 @@ class MainWindow(Adw.ApplicationWindow):
         entry = self.health.get(d.name)
         h = entry["h"] if entry else None
         ident = rp.identity_from(h, d.model, d.size, d.serial)
-        r = rp.health_report(h, ident, VERSION, os_label(), socket.gethostname())
+        r = rp.health_report(h, ident, VERSION, os_label(), socket.gethostname(), meta=SETTINGS.meta)
         try:
             pdf, txt = rp.save(r, reports_folder())
         except OSError as e:
@@ -1579,11 +1614,18 @@ class MainWindow(Adw.ApplicationWindow):
         if after is not None and after.available:
             prev = self.health.get(j.disk.name) or {}
             self.health[j.disk.name] = {"h": after, "hpa": prev.get("hpa") or {}, "t": time.time()}
+        fin = None
+        try:
+            fin = json.loads((j.dir / jobfinish.FINISH_FILE).read_text())
+        except (OSError, ValueError):
+            fin = None
         if j.kind != "selftest":
             try:
-                j.reports = self.write_reports(j)
+                j.reports = self.collect_reports(j, fin) if fin and fin.get("files") else self.write_reports(j)
             except Exception as e:  # Protokoll darf den Ablauf nie stören
                 j.reports = {"error": str(e)}
+        if fin and fin.get("notifiedLocal"):
+            notify = False   # hat sich schon selbst gemeldet, als WipeKit geschlossen war
         try:
             (j.dir / "reports.json").write_text(json.dumps(j.reports))
         except OSError:
@@ -1606,61 +1648,359 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             title = f"{j.title} fehlgeschlagen"
             text = f"{d.model} ({d.path}): {j.message or 'Unbekannter Fehler'}"
+        if fin and fin.get("push") not in (None, "ok"):
+            text += f"\n\nBenachrichtigung aufs Handy fehlgeschlagen: {fin['push']}"
         if notify:
-            n = Gio.Notification.new(title)
-            n.set_body(text)
-            self.app.send_notification(j.id, n)
+            if SETTINGS["notifyLocal"]:
+                n = Gio.Notification.new(title)
+                n.set_body(text)
+                self.app.send_notification(j.id, n)
+            if SETTINGS["playSound"] and shutil.which("canberra-gtk-play"):
+                event = "complete" if j.state == "done" else "dialog-warning"
+                subprocess.Popen(["canberra-gtk-play", "-i", event], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.inform(title, text)
 
-    def write_reports(self, j: Job) -> dict:
-        d, s = j.disk, j.status
-        before = load_health(j.dir / "smart-before.json")
-        after = load_health(j.dir / "smart-after.json")
-        started = s.startedAt if s and s.startedAt else j.info["createdAt"]
-        ended = s.finishedAt if s and s.finishedAt else time.time()
-        verification = "nicht vorgesehen"
-        if j.mode.verify == "full":
-            v = s.verified if s else None
-            if v is True:
-                verification = ("bestanden – alle Sektoren gelesen und mit den geschriebenen Zufallsdaten verglichen"
-                                if j.mode.passes and j.mode.passes[-1] == "seeded"
-                                else "bestanden – alle Sektoren gelesen, alle enthalten Nullen")
-            elif v is False:
-                verification = "NICHT bestanden"
-            else:
-                verification = "nicht durchgeführt"
-        elif j.mode.verify == "samples":
-            verification = (s.sampleResult if s and s.sampleResult else "nicht durchgeführt")
-        w = rp.WipeInfo(
-            mode_title=j.title if j.kind == "check" else j.mode.title, method=j.mode.method_description,
-            standard=j.mode.standard, state=j.state, started=started, ended=ended,
-            bytes_written=(s.bytesDoneTotal if s else 0) if not j.mode.purge else 0,
-            message=j.message or "", verification=verification,
-            trim=((s.trimResult if s else None) or "nicht durchgeführt") if j.mode.trims else "",
-            device=d.path, bus=d.bus + (" (intern)" if d.internal else ""), type_label=d.type_label,
-            volumes=d.volumes, exact_size=(s.diskSize if s and s.diskSize else d.size),
-            hidden_area=(s.hiddenArea if s and s.hiddenArea else ""), host=socket.gethostname(),
-            platform=os_label(), app_version=VERSION, read_only=j.mode.read_only,
-            bad_blocks=(s.badBlocks if s else None) if j.mode.read_only else None,
-            non_zero=(s.nonZeroBytes if s else None) if j.mode.read_only else None,
-            purge_method=(s.purgeMethod if s and s.purgeMethod else ""))
-        ident = rp.identity_from(before or after, d.model, d.size, d.serial)
+    def collect_reports(self, j: Job, fin: dict) -> dict:
+        """Vom Arbeitsprozess erstellte Protokolle in den Berichte-Ordner kopieren"""
         folder = reports_folder()
         out = {}
-        if j.mode.read_only:
-            r = rp.wipe_report(w, ident, before, after, detailed=True)
-            pdf, txt = rp.save(r, folder)
-            out.update(pdf=str(pdf), txt=str(txt), title="Prüfprotokoll")
-        else:
-            r = rp.wipe_report(w, ident, before, after, detailed=False)
-            pdf, txt = rp.save(r, folder)
-            out.update(pdf=str(pdf), txt=str(txt), title="Löschprotokoll")
-            r = rp.wipe_report(w, ident, before, after, detailed=True)
-            pdf, txt = rp.save(r, folder)
-            out.update(pdf_full=str(pdf), txt_full=str(txt))
+        for i, f in enumerate(fin.get("files", [])):
+            src_p, src_t = Path(f["pdf"]), Path(f["txt"])
+            (folder / "PDF").mkdir(parents=True, exist_ok=True)
+            (folder / "Text").mkdir(parents=True, exist_ok=True)
+            dp = rp.unique(folder / "PDF" / src_p.name)
+            dt = rp.unique(folder / "Text" / src_t.name)
+            shutil.copyfile(src_p, dp)
+            shutil.copyfile(src_t, dt)
+            if i == 0:
+                out.update(pdf=str(dp), txt=str(dt), title=f["title"])
+            else:
+                out.update(pdf_full=str(dp), txt_full=str(dt))
+        return out
+
+    def write_reports(self, j: Job) -> dict:
+        s = j.status
+        before = load_health(j.dir / "smart-before.json")
+        after = load_health(j.dir / "smart-after.json")
+        settings = SETTINGS.job_settings(socket.gethostname(), os_label(), VERSION)
+        out = {}
+        for i, (title, r) in enumerate(jobfinish.build_reports(j.info, s, j.state, j.message, before, after, settings)):
+            pdf, txt = rp.save(r, reports_folder(), serial=SETTINGS["serialInFileName"])
+            if i == 0:
+                out.update(pdf=str(pdf), txt=str(txt), title=title)
+            else:
+                out.update(pdf_full=str(pdf), txt_full=str(txt))
         return out
 
     # --- Sonstiges ---------------------------------------------------------------------------
+
+    # --- Einstellungen und Updates ------------------------------------------------------
+
+    def show_preferences(self, page=0):
+        win = Adw.PreferencesWindow(transient_for=self, modal=True, title="Einstellungen")
+        win.set_default_size(620, 680)
+        st = SETTINGS
+
+        def switch(group, title, key, subtitle=None):
+            row = Adw.SwitchRow(title=title)
+            if subtitle:
+                row.set_subtitle(subtitle)
+            row.set_active(bool(st[key]))
+            row.connect("notify::active", lambda r, *_: st.__setitem__(key, r.get_active()))
+            group.add(row)
+            return row
+
+        def entry(group, title, key):
+            row = Adw.EntryRow(title=title)
+            row.set_text(st[key] or "")
+            row.connect("changed", lambda r: st.__setitem__(key, r.get_text()))
+            group.add(row)
+            return row
+
+        # Allgemein
+        general = Adw.PreferencesPage(title="Allgemein", icon_name="preferences-system-symbolic")
+        g = Adw.PreferencesGroup(title="Mitteilungen",
+                                 description="Auch wenn WipeKit geschlossen ist, meldet sich der Vorgang beim Ende.")
+        switch(g, "Mitteilung, wenn ein Vorgang endet", "notifyLocal")
+        switch(g, "Ton abspielen", "playSound")
+        general.add(g)
+        g = Adw.PreferencesGroup(title="Löschen")
+        keys = [m.key for m in MODES if not m.read_only and not m.key.startswith("selftest")]
+        combo = Adw.ComboRow(title="Vorausgewählte Methode",
+                             model=Gtk.StringList.new([MODES_BY_KEY[k].title for k in keys]))
+        combo.set_selected(keys.index(st["defaultMode"]) if st["defaultMode"] in keys else keys.index("secure"))
+        combo.connect("notify::selected", lambda r, *_: st.__setitem__("defaultMode", keys[r.get_selected()]))
+        g.add(combo)
+        general.add(g)
+        g = Adw.PreferencesGroup()
+        reset = Adw.ActionRow(title="Alle Einstellungen zurücksetzen",
+                              subtitle="Auch gespeicherte Zugangsdaten. Berichte bleiben erhalten.")
+        btn = Gtk.Button(label="Zurücksetzen", valign=Gtk.Align.CENTER, css_classes=["destructive-action"])
+        btn.connect("clicked", lambda *_: (st.reset(), win.close()))
+        reset.add_suffix(btn)
+        g.add(reset)
+        general.add(g)
+        win.add(general)
+
+        # Berichte
+        rep = Adw.PreferencesPage(title="Berichte", icon_name="x-office-document-symbolic")
+        g = Adw.PreferencesGroup(title="Speicherort", description="In den Unterordnern »PDF« und »Text«.")
+        where = Adw.ActionRow(title=str(reports_folder()))
+        choose = Gtk.Button(label="Ändern …", valign=Gtk.Align.CENTER)
+
+        def pick(*_):
+            dlg = Gtk.FileDialog(title="Ordner für Berichte")
+            dlg.set_initial_folder(Gio.File.new_for_path(str(reports_folder())))
+
+            def done(d, res):
+                try:
+                    f = d.select_folder_finish(res)
+                except GLib.Error:
+                    return
+                if f and f.get_path():
+                    st["reportsPath"] = f.get_path()
+                    where.set_title(f.get_path())
+            dlg.select_folder(win, None, done)
+        choose.connect("clicked", pick)
+        where.add_suffix(choose)
+        g.add(where)
+        switch(g, "Ausführliches Löschprotokoll zusätzlich", "detailedReport")
+        switch(g, "Seriennummer im Dateinamen", "serialInFileName")
+        rep.add(g)
+        g = Adw.PreferencesGroup(title="Angaben im Protokoll")
+        entry(g, "Durchgeführt von", "operatorName")
+        entry(g, "Firma / Organisation", "organization")
+        entry(g, "Notiz (z. B. Auftragsnummer)", "reportNote")
+        rep.add(g)
+        win.add(rep)
+
+        # Benachrichtigungen
+        push_page = self._push_page(win)
+        win.add(push_page)
+
+        # Updates
+        upd = Adw.PreferencesPage(title="Updates", icon_name="software-update-available-symbolic")
+        g = Adw.PreferencesGroup(title="Updates",
+                                 description="Updates kommen aus den Releases auf GitHub und werden vor der Installation "
+                                             "anhand ihrer digitalen Signatur geprüft. Während ein Vorgang läuft, wird "
+                                             "nichts installiert.")
+        status_row = Adw.ActionRow(title=f"Installiert: WipeKit {VERSION}", subtitle=self.update_status_text)
+        check = Gtk.Button(label="Jetzt suchen", valign=Gtk.Align.CENTER)
+        install = Gtk.Button(label="Installieren", valign=Gtk.Align.CENTER, css_classes=["suggested-action"], visible=False)
+
+        def do_check(*_):
+            check.set_sensitive(False)
+            status_row.set_subtitle("Suche nach Updates …")
+
+            def worker():
+                r, text = updater.check()
+
+                def ui():
+                    self.update_status_text = text
+                    status_row.set_subtitle(text)
+                    check.set_sensitive(True)
+                    install.set_visible(updater.can_install(r))
+                    if r:
+                        install.set_label(f"Version {r['version']} installieren")
+                        install.release = r
+                    return False
+                GLib.idle_add(ui)
+            import threading
+            threading.Thread(target=worker, daemon=True).start()
+
+        def do_install(*_):
+            r = getattr(install, "release", None)
+            if r:
+                win.close()
+                self.install_update(r)
+        check.connect("clicked", do_check)
+        install.connect("clicked", do_install)
+        status_row.add_suffix(install)
+        status_row.add_suffix(check)
+        g.add(status_row)
+        auto = switch(g, "Beim Start automatisch suchen", "autoCheck")
+        inst = switch(g, "Updates automatisch installieren", "autoInstall")
+        inst.set_sensitive(st["autoCheck"])
+        auto.connect("notify::active", lambda r, *_: inst.set_sensitive(r.get_active()))
+        upd.add(g)
+        win.add(upd)
+
+        pages = [general, rep, push_page, upd]
+        if 0 <= page < len(pages):
+            win.set_visible_page(pages[page])
+        win.present()
+        return win
+
+    def _push_page(self, win):
+        st = SETTINGS
+        c = st.push
+        page = Adw.PreferencesPage(title="Benachrichtigungen", icon_name="preferences-system-notifications-symbolic")
+        g = Adw.PreferencesGroup(title="Aufs Handy", description="Eine Nachricht, wenn ein Vorgang endet – auch wenn "
+                                                                   "WipeKit geschlossen ist.")
+        services = [("off", "Aus"), ("hub", "WipeKit Hub (selbst gehostet)"), ("ntfy", "ntfy"), ("discord", "Discord")]
+        combo = Adw.ComboRow(title="Dienst", model=Gtk.StringList.new([t for _, t in services]))
+        combo.set_selected(next((i for i, (k, _) in enumerate(services) if k == c["service"]), 0))
+        g.add(combo)
+        page.add(g)
+        detail = Adw.PreferencesGroup()
+        events = Adw.PreferencesGroup(title="Benachrichtigen bei")
+        page.add(detail)
+        page.add(events)
+        rows = []
+
+        def save():
+            st.save()
+
+        def text_row(title, key, secret=False):
+            row = Adw.PasswordEntryRow(title=title) if secret else Adw.EntryRow(title=title)
+            row.set_text(c.get(key, ""))
+            row.connect("changed", lambda r: (c.__setitem__(key, r.get_text().strip()), save()))
+            detail.add(row)
+            rows.append((detail, row))
+            return row
+
+        def fill():
+            for grp, row in rows:
+                grp.remove(row)
+            rows.clear()
+            svc = c["service"]
+            detail.set_title({"hub": "WipeKit Hub", "ntfy": "ntfy", "discord": "Discord"}.get(svc, ""))
+            detail.set_description({
+                "hub": "Protokolle und Laufwerksdaten werden auf diesem Rechner verschlüsselt. Nur dein Browser kann sie "
+                       "mit deinem Hub-Passwort öffnen – der Server selbst nicht. Lesbar ist für ihn nur die kurze "
+                       "Mitteilung. Den Kopplungscode gibt es im Hub unter »Geräte«.",
+                "ntfy": "Gesendet wird nur die kurze Mitteilung, keine Protokolle. Auf dem öffentlichen Server ntfy.sh "
+                        "kann jeder mitlesen, der das Thema kennt – wähle einen langen, zufälligen Namen oder einen "
+                        "eigenen Server mit Anmeldung. Auch ein eigener Server leitet für das iPhone einen Weckruf "
+                        "(ohne Inhalt) über ntfy.sh.",
+                "discord": "Gesendet wird nur die kurze Mitteilung, keine Protokolle – Discord-Nachrichten sind nicht "
+                           "Ende-zu-Ende-verschlüsselt. Den Webhook legst du in Discord unter Kanal bearbeiten › "
+                           "Integrationen an.",
+            }.get(svc, ""))
+            if svc == "hub":
+                text_row("Kopplungscode (WKHUB1:…)", "hubCode", secret=True)
+                sw = Adw.SwitchRow(title="Protokolle (PDF) mitsenden", active=c["hubFiles"])
+                sw.connect("notify::active", lambda r, *_: (c.__setitem__("hubFiles", r.get_active()), save()))
+                detail.add(sw)
+                rows.append((detail, sw))
+            elif svc == "ntfy":
+                text_row("Server", "ntfyServer")
+                text_row("Thema (langer, zufälliger Name)", "ntfyTopic")
+                auths = [("none", "Keine Anmeldung"), ("token", "Zugriffstoken"), ("password", "Benutzer und Passwort")]
+                ac = Adw.ComboRow(title="Anmeldung", model=Gtk.StringList.new([t for _, t in auths]))
+                ac.set_selected(next((i for i, (k, _) in enumerate(auths) if k == c["ntfyAuth"]), 0))
+                ac.connect("notify::selected", lambda r, *_: (c.__setitem__("ntfyAuth", auths[r.get_selected()][0]),
+                                                               save(), fill()))
+                detail.add(ac)
+                rows.append((detail, ac))
+                if c["ntfyAuth"] == "password":
+                    text_row("Benutzer", "ntfyUser")
+                if c["ntfyAuth"] != "none":
+                    text_row("Token" if c["ntfyAuth"] == "token" else "Passwort", "ntfySecret", secret=True)
+            elif svc == "discord":
+                text_row("Webhook-Adresse", "discordWebhook", secret=True)
+            if svc == "off":
+                return
+            for key, title in (("onDone", "Erfolgreich beendet"), ("onFailed", "Fehlgeschlagen"),
+                               ("onCancelled", "Abgebrochen"), ("onWarning", "Gesundheitswarnung")):
+                sw = Adw.SwitchRow(title=title, active=bool(c[key]))
+                sw.connect("notify::active", lambda r, *_, k=key: (c.__setitem__(k, r.get_active()), save()))
+                events.add(sw)
+                rows.append((events, sw))
+            test = Adw.ActionRow(title="Testnachricht", subtitle="")
+            b = Gtk.Button(label="Senden", valign=Gtk.Align.CENTER)
+
+            def send(*_):
+                save()
+                if not push.is_configured(c):
+                    test.set_subtitle("Bitte zuerst alle Angaben ausfüllen.")
+                    return
+                b.set_sensitive(False)
+                test.set_subtitle("Wird gesendet …")
+
+                def worker():
+                    ev = {"kind": "test", "state": "done", "warning": False,
+                          "notice": f"Testnachricht von WipeKit auf »{socket.gethostname()}« – alles eingerichtet.",
+                          "meta": {"host": socket.gethostname(), "platform": os_label(), "app": VERSION}, "files": []}
+                    r = push.send(c, ev, force=True)
+                    GLib.idle_add(lambda: (test.set_subtitle(r or "Gesendet."), b.set_sensitive(True), False)[-1])
+                import threading
+                threading.Thread(target=worker, daemon=True).start()
+            b.connect("clicked", send)
+            test.add_suffix(b)
+            events.add(test)
+            rows.append((events, test))
+
+        def on_service(r, *_):
+            c["service"] = services[r.get_selected()][0]
+            save()
+            fill()
+        combo.connect("notify::selected", on_service)
+        fill()
+        return page
+
+    update_status_text = "Noch nicht gesucht."
+
+    def updates_on_launch(self):
+        if not SETTINGS["updatesAsked"]:
+            SETTINGS["updatesAsked"] = True
+
+            def answer(yes):
+                SETTINGS["autoCheck"] = yes
+                SETTINGS["autoInstall"] = yes
+                if yes:
+                    self.check_updates(user=False)
+            self.ask("Automatisch nach Updates suchen?",
+                     "WipeKit kann bei jedem Start auf GitHub nach einer neuen Version suchen und sie installieren. "
+                     "Updates werden vorher anhand ihrer Signatur geprüft. Das lässt sich jederzeit in den "
+                     "Einstellungen ändern.", "Automatisch suchen", lambda: answer(True), destructive=False)
+            return False
+        if SETTINGS["autoCheck"]:
+            self.check_updates(user=False)
+        return False
+
+    def check_updates(self, user=False):
+        import threading
+
+        def worker():
+            r, text = updater.check()
+
+            def ui():
+                self.update_status_text = text
+                if r is None:
+                    if user:
+                        self.inform("Keine neue Version", text)
+                    return False
+                if not user and SETTINGS["autoInstall"] and updater.can_install(r):
+                    self.install_update(r)
+                    return False
+                if updater.can_install(r):
+                    self.ask(f"WipeKit {r['version']} ist verfügbar", f"Installiert ist Version {VERSION}.",
+                             "Installieren", lambda: self.install_update(r), destructive=False)
+                else:
+                    self.inform(f"WipeKit {r['version']} ist verfügbar", text + f"\n\n{r['page']}")
+                return False
+            GLib.idle_add(ui)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def install_update(self, r):
+        import threading
+        if any(j.active for j in self.jobs):
+            GLib.timeout_add_seconds(60, lambda: (self.install_update(r), False)[-1])
+            return
+
+        def worker():
+            err = updater.install(r)
+
+            def ui():
+                if err is None:
+                    # Neu starten mit der neuen Version
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                elif err != "Abgebrochen.":
+                    self.inform("Update fehlgeschlagen", err)
+                return False
+            GLib.idle_add(ui)
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_open_reports(self, *_):
         folder = reports_folder()

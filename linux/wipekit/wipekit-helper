@@ -81,6 +81,7 @@ class Engine:
         self.seed = int.from_bytes(os.urandom(8), "little")
         self.devtype = ""
         self.sample_hashes = {}
+        self.after_saved = False
 
     # -- Status ---------------------------------------------------------------
 
@@ -127,6 +128,11 @@ class Engine:
 
     def finish(self, state: str, message: str) -> int:
         self.stop_inhibit()
+        if self.disk is not None and self.mode_key not in SELFTESTS and not self.after_saved:
+            self.after_saved = True
+            self.status.phase = "Gesundheitsdaten werden gelesen …"
+            self.write_status()
+            self.save_smart("smart-after.json")
         self.status.state = state
         self.status.message = message
         self.status.finishedAt = time.time()
@@ -134,7 +140,17 @@ class Engine:
         self.status.indeterminate = False
         if state == "done":
             self.status.bytesDoneTotal = self.status.bytesTotal
-        self.write_status()
+        if self.mode_key in SELFTESTS:
+            self.write_status()
+        else:
+            # Protokolle, Mitteilung und Benachrichtigung aufs Handy (auch wenn WipeKit geschlossen ist)
+            try:
+                import jobfinish
+                from pathlib import Path
+                jobfinish.finish(Path(self.job_dir), self.status, state, message, self.write_status)
+            except Exception as e:  # darf den Abschluss nie verhindern
+                print(f"Abschluss: {e}", file=sys.stderr)
+                self.write_status()
         return 0 if state == "done" else 1
 
     # -- Ruhezustand ------------------------------------------------------------
@@ -200,7 +216,8 @@ class Engine:
         except Exception as e:  # unerwartet
             return self.finish("failed", f"Unerwarteter Fehler: {e}")
         finally:
-            if self.disk is not None and self.mode_key not in SELFTESTS:
+            if self.disk is not None and self.mode_key not in SELFTESTS and not self.after_saved:
+                self.after_saved = True
                 self.save_smart("smart-after.json")
 
     def _run(self) -> int:

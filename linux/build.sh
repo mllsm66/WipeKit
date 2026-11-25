@@ -29,14 +29,21 @@ install -D -m 644 assets/icon-256.png "$PKG/usr/share/icons/hicolor/256x256/apps
 install -D -m 644 assets/icon-512.png "$PKG/usr/share/icons/hicolor/512x512/apps/$APP_ID.png"
 install -D -m 644 LICENSE "$PKG/usr/share/doc/wipekit/copyright"
 install -D -m 644 THIRD-PARTY-NOTICES.md "$PKG/usr/share/doc/wipekit/THIRD-PARTY-NOTICES.md"
+# Öffentlicher Schlüssel für die Prüfung von Updates (aus dem geheimen Signaturschlüssel abgeleitet)
+if [ -n "${UPDATE_SIGNING_KEY:-}" ]; then
+  install -d "$PKG/usr/share/wipekit"
+  printf '%s\n' "$UPDATE_SIGNING_KEY" | openssl ec -pubout -out "$PKG/usr/share/wipekit/update-public-key.pem" 2>/dev/null
+  chmod 644 "$PKG/usr/share/wipekit/update-public-key.pem"
+  cp "$PKG/usr/share/wipekit/update-public-key.pem" "$STAGE/wipekit/update-public-key.pem"
+fi
 cat > "$PKG/DEBIAN/control" <<CONTROL
 Package: wipekit
 Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), adwaita-icon-theme, librsvg2-common, pkexec | policykit-1, util-linux, smartmontools
-Recommends: hdparm, nvme-cli
+Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, python3-cryptography, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), adwaita-icon-theme, librsvg2-common, pkexec | policykit-1, util-linux, smartmontools
+Recommends: hdparm, nvme-cli, gir1.2-secret-1, libnotify-bin
 Maintainer: mllsm66 <mllsm66@users.noreply.github.com>
 Homepage: https://github.com/mllsm66/WipeKit
 Description: Laufwerke sicher löschen und ihre Gesundheit prüfen

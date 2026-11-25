@@ -93,6 +93,7 @@ class WipeInfo:
     bad_blocks: int = None
     non_zero: int = None
     purge_method: str = ""
+    meta: list = field(default_factory=list)   # [(Bezeichnung, Wert)] – „Durchgeführt von“ usw.
 
 
 def identity_from(h, model="", size=0, serial="") -> Identity:
@@ -117,15 +118,15 @@ def _slug(s: str) -> str:
     return re.sub(r"-{2,}", "-", s)
 
 
-def base_name(ident: Identity, when: float) -> str:
+def base_name(ident: Identity, when: float, serial=True) -> str:
     parts = [_slug(ident.vendor if ident.vendor != "Unbekannt" else ""), _slug(ident.model),
-             size_gb(ident.size) if ident.size else "", _slug(ident.serial)]
+             size_gb(ident.size) if ident.size else "", _slug(ident.serial) if serial else ""]
     name = "-".join(p for p in parts if p) or "LAUFWERK"
     return time.strftime("%Y-%m-%d_%H-%M", time.localtime(when)) + "_" + name[:150]
 
 
-def file_name(report: Report, ext: str) -> str:
-    return f"{base_name(report.identity, report.created)}_{report.kind[1]}.{ext}"
+def file_name(report: Report, ext: str, serial=True) -> str:
+    return f"{base_name(report.identity, report.created, serial)}_{report.kind[1]}.{ext}"
 
 
 def reports_folder() -> Path:
@@ -140,20 +141,20 @@ def reports_folder() -> Path:
     return Path(docs or (Path.home() / "Documents")) / "WipeKit-Protokolle"
 
 
-def save(report: Report, folder: Path = None) -> tuple:
+def save(report: Report, folder: Path = None, serial=True) -> tuple:
     """Speichert PDF und Text, gibt (pdf_pfad, txt_pfad) zurück."""
     folder = folder or reports_folder()
     pdf_dir, txt_dir = folder / "PDF", folder / "Text"
     pdf_dir.mkdir(parents=True, exist_ok=True)
     txt_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = _unique(pdf_dir / file_name(report, "pdf"))
-    txt_path = _unique(txt_dir / file_name(report, "txt"))
+    pdf_path = unique(pdf_dir / file_name(report, "pdf", serial))
+    txt_path = unique(txt_dir / file_name(report, "txt", serial))
     pdf_path.write_bytes(render_pdf(report))
     txt_path.write_text(render_text(report), encoding="utf-8")
     return pdf_path, txt_path
 
 
-def _unique(p: Path) -> Path:
+def unique(p: Path) -> Path:
     if not p.exists():
         return p
     for i in range(2, 100):
@@ -232,7 +233,7 @@ def _health_sections(h, title_suffix="", with_tables=True) -> list:
     return secs
 
 
-def health_report(h, ident: Identity, app_version="", platform="", host="", created=None) -> Report:
+def health_report(h, ident: Identity, app_version="", platform="", host="", created=None, meta=()) -> Report:
     r = Report(KIND_HEALTH, created or time.time(), ident,
                h.rating if h is not None else hl.UNKNOWN,
                (h.reasons[0] if h is not None and h.available and h.reasons else
@@ -240,7 +241,7 @@ def health_report(h, ident: Identity, app_version="", platform="", host="", crea
     r.sections = _health_sections(h)
     r.sections.append(Section("Bericht", [("kv", [
         ("Erstellt", fmt_dt_sec(r.created)), ("Rechner", host or "–"),
-        ("System", platform or "–"), ("Programm", f"WipeKit {app_version}".strip())])]))
+        ("System", platform or "–"), ("Programm", f"WipeKit {app_version}".strip())] + list(meta))]))
     r.footer = f"WipeKit {app_version}".strip()
     return r
 
@@ -324,11 +325,12 @@ def wipe_report(w: WipeInfo, ident: Identity, before=None, after=None, detailed=
     if compact:
         line = (f"Erstellt am {fmt_dt_sec(r.created)} auf »{w.host or '–'}« ({w.platform or '–'}) "
                 f"mit WipeKit {w.app_version}.".replace("  ", " "))
-        r.sections.append(Section("Protokoll", [("text", line + " " + NOT_CERTIFIED)]))
+        blocks = [("kv", list(w.meta))] if w.meta else []
+        r.sections.append(Section("Protokoll", blocks + [("text", line + " " + NOT_CERTIFIED)]))
     else:
         r.sections.append(Section("Protokoll", [("kv", [
             ("Erstellt", fmt_dt_sec(r.created)), ("Rechner", w.host or "–"), ("System", w.platform or "–"),
-            ("Programm", f"WipeKit {w.app_version}".strip())]), ("text", NOT_CERTIFIED)]))
+            ("Programm", f"WipeKit {w.app_version}".strip())] + list(w.meta)), ("text", NOT_CERTIFIED)]))
     r.footer = f"WipeKit {w.app_version}".strip()
     return r
 
